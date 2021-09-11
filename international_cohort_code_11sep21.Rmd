@@ -1,0 +1,2187 @@
+---
+title: "Characteristics and outcomes of an international cohort of 400,000 hospitalised patients with Covid-19"
+date: "`r format(Sys.Date(), format = '%d %b %Y')`"
+output:
+  word_document:
+    toc: yes
+    toc_depth: '5'
+  html_document:
+    fig_caption: yes
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapse: no
+editor_options:
+  chunk_output_type: console
+always_allow_html: true
+---
+
+```{r, echo = FALSE, include = FALSE}
+#    code_folding: hide
+library(knitr)
+
+opts_chunk$set(fig.width = 5.75, fig.height = 5.5, echo = FALSE, eval = TRUE, message = FALSE, warning = FALSE, error = TRUE, cache = FALSE, cache.lazy = FALSE, fig.align = "left", sanitize = TRUE, fig.topcaption = TRUE, cache.path = "cache/", fig.path = paste0("figures/", knitr::opts_chunk$get("fig.path")))
+# opts_chunk$set(fig.width = 2.5, fig.height = 3, eval = TRUE, include = TRUE, cache = TRUE)
+
+# install.packages('printr', type = 'source', repos = c('http://yihui.name/xran', 'http://cran.rstudio.com'))
+
+library(printr)
+
+supplement <- TRUE
+```
+
+```{r}
+load("prepr.tbl.august.rda")
+
+data <- prepr.tbl
+rm(prepr.tbl)
+```
+
+```{r, eval = FALSE}
+# write.csv(table(data$slider_country), file = "patients_by_country_20jul21.csv")
+```
+
+```{r}
+library(tidyselect)
+library(plyr)
+library(tidyverse)
+library(magrittr)
+library(glue)
+library(viridis)
+library(ggupset)
+library(sf)
+library(rgeos)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(magrittr)
+library(binom)
+library(fitdistrplus)
+library(lubridate)
+library(grid)
+library(binom)
+library(boot)
+library(survival)
+library(survminer)
+library(broom)
+library(taRifx)
+library(gridExtra)
+library(psych)
+library(cowplot)
+
+library(qvcalc)
+library(DiagrammeR)
+library(finalfit)
+# library(kableExtra)
+library(patchwork)
+library(scales)
+
+options(scipen = 7) # 999 - no scientific notation
+```
+
+```{r, include = FALSE}
+table(data[which(data$slider_country == "Congo"),]$siteid_final, useNA = "ifany")
+data[which(data$slider_country == "Congo"),]$slider_country <- "Colombia"
+
+#  Saint Kitts and Nevis should be recoded as Romania
+# Nicaragua should be recoded as Netherlands
+table(data[which(data$slider_country == "Saint Kitts and Nevis"),]$siteid_final, useNA = "ifany")
+data[which(data$slider_country == "Saint Kitts and Nevis"),]$slider_country <- "Romania"
+
+table(data[which(data$slider_country == "Nicaragua"),]$siteid_final, useNA = "ifany")
+data[which(data$slider_country == "Nicaragua"),]$slider_country <- "Netherlands"
+
+# studyID CVZXZMV (South Africa) has NAs in all records for date_admit, but instead has dates in date_onset. date_onset should be used for these SA records that don't have date_admit.
+table(!is.na(data$date_admit))
+table(!is.na(data$date_onset))
+
+table(!is.na(data$date_admit) | !is.na(data$date_onset))
+table(data[which(is.na(data$date_admit) & is.na(data$date_onset)),]$siteid_final)
+table(data[which(!is.na(data$date_admit) & is.na(data$date_onset)),]$siteid_final)
+table(data[which(is.na(data$date_start)),]$siteid_final)
+# that's fine because date_start already incorporates this fix
+```
+
+```{r, include = FALSE}
+#################################################
+# create variables
+#################################################
+
+data <- as.data.frame(data)
+
+data <- data[,-which(names(data) == "outcome")]
+names(data) <- gsub("slider_", "", names(data))
+
+data$age10 <- cut(data$age, c(0, seq(20, 100, by = 10), 120), right = FALSE, include.lowest = TRUE)
+data$age20 <- cut(data$age, c(seq(0, 80, by = 20), 120), right = FALSE, include.lowest = TRUE)
+
+# change reference level of age to 20-30
+data$age10 <- relevel(data$age10, ref = 2)
+# change reference level of age to 20-40
+data$age20 <- relevel(data$age20, ref = 2)
+
+#################################################
+
+data$source <- NA
+data[which(as.character(data$studyid) %in% c("CVVCORE", "CVRAPID", "CVCCPUK")),]$source <- "REDCap"
+data[which(as.character(data$studyid) %in% c("CVVECMO")),]$source <- "ECMOCARD"
+data[which(!(as.character(data$studyid) %in% c("CVVCORE", "CVRAPID", "CVCCPUK", "CVVECMO"))),]$source <- "IDDO"
+
+#################################################
+
+country.class <- read.csv("country_classifications.csv", stringsAsFactors = FALSE)
+
+# change USA so that it is merged correctly
+country.class[which(country.class$Country == "USA"),]$Country <- "United States"
+country.class[which(country.class$Country == "UK"),]$Country <- "United Kingdom"
+
+# and a few others:
+data$country <- gsub("Czechia", "Czech Republic", data$country)
+data$country <- gsub("Korea, Republic of", "South Korea", data$country)
+data$country <- gsub("Saint Kitts and Nevis", "St. Kitts and Nevis", data$country)
+data$country <- gsub("Saint Vincent and the Grenadines", "St. Vincent and the Grenadines", data$country)
+data$country <- gsub("Taiwan, Province of China", "Taiwan", data$country)
+data$country <- gsub("Viet Nam", "Vietnam", data$country)
+
+data <- data %>%
+  left_join(country.class, by = c("country" = "Country"))
+
+#################################################
+
+data$outcome_original <- data$outcome
+
+data$outcome <- NA
+data[which(data$outcome_original %in% c("Death")),]$outcome <- "Death"
+data[which(data$outcome_original %in% c("Discharge")),]$outcome <- "Discharge"
+data[which(data$outcome_original %in% c("Ongoing care", "LTFU")),]$outcome <- "Censored"
+
+#################################################
+
+# create variable which indicates that an individual was admitted directly in ICU
+
+data$start.to.ICU <- as.numeric(difftime(pmin(as.Date(data$date_outcome, format = "%Y-%m-%d"), as.Date(data$icu_in, format = "%Y-%m-%d"), na.rm = TRUE), as.Date(data$date_admit, format = "%Y-%m-%d"), units = "days"))
+data[which(data$start.to.ICU < 0 | data$start.to.ICU > 100),]$start.to.ICU <- NA
+data$time_to_icu <- data$start.to.ICU
+data$icu_day0 <- as.factor(data$icu_ever == 1 & data$time_to_icu == 0)
+
+data$icu_day0_later <- factor(droplevels(interaction(data$icu_ever, data$icu_day0)), labels = c("Never", "Later admission", "Direct admission"))
+# table(data$icu_day0_later, useNA = "ifany")
+
+#################################################
+
+data$oxygen_treatments_count <- as.factor(apply(data[,c("treat_non_invasive_ventilation", "treat_invasive_ventilation", "treat_high_flow_nasal_cannula", "treat_extracorporeal")], 1, sum, na.rm = TRUE))
+
+# generate any_oxygen variable which is NA if NA for all four variables, FALSE if FALSE for all four variables and TRUE if at least one of the four is TRUE
+data$any_oxygen <- NA
+data[which(data$treat_invasive_ventilation == FALSE & data$treat_non_invasive_ventilation == FALSE & data$treat_high_flow_nasal_cannula == FALSE & data$treat_mask_oxygen_therapy == FALSE & data$treat_nasal_oxygen_therapy == FALSE & data$treat_extracorporeal == FALSE),]$any_oxygen <- FALSE
+data[which(data$treat_invasive_ventilation == TRUE | data$treat_non_invasive_ventilation == TRUE | data$treat_high_flow_nasal_cannula == TRUE | data$treat_mask_oxygen_therapy == TRUE | data$treat_nasal_oxygen_therapy == TRUE | data$treat_extracorporeal == TRUE),]$any_oxygen <- TRUE
+
+table("oxygen_therapy" = data$oxygen_therapy, "any_oxygen" = data$any_oxygen, useNA = "ifany")
+
+# treat_oxygen_therapy
+table("treat_oxygen_therapy" = data$treat_oxygen_therapy, "any_oxygen" = data$any_oxygen, useNA = "ifany")
+table("treat_oxygen_therapy" = data$treat_oxygen_therapy, "oxygen_therapy" = data$oxygen_therapy, useNA = "ifany")
+
+# create new variable for unspecified oxygen therapy
+data$oxygen_unspecified <- NA
+data[which(data$oxygen_treatments_count == 0 & data$treat_oxygen_therapy == FALSE),]$oxygen_unspecified <- FALSE
+data[which(data$oxygen_treatments_count == 0 & data$treat_oxygen_therapy == TRUE),]$oxygen_unspecified <- TRUE
+table(data$oxygen_unspecified, useNA = "ifany")
+table("treat_oxygen_therapy" = data$treat_oxygen_therapy, "oxygen_unspecified" = data$oxygen_unspecified, useNA = "ifany")
+
+# change oxygen_treatments_count to missing if any_oxygen is missing
+data[which(is.na(data$treat_oxygen_therapy)),]$oxygen_treatments_count <- NA
+
+#################################################
+
+table(data$cov_det_id, useNA = "ifany")
+
+data <- data %>%
+  filter((clin_diag_covid_19 == TRUE & is.na(cov_det_id)) | cov_det_id == "POSITIVE")
+
+data$sars_cov2 <- data$cov_det_id
+# table(data$sars_cov2, useNA = "ifany")
+
+data[is.na(data$sars_cov2),]$sars_cov2 <- "Unknown"
+data$sars_cov2 <- factor(data$sars_cov2, labels = c("Positive", "Unknown"))
+
+#################################################
+
+data$onset_to_admission <- as.numeric(as.Date(data$date_admit, format = "%Y-%m-%d") - as.Date(data$date_onset, format = "%Y-%m-%d"))
+data[which(data$onset_to_admission > 100 | data$onset_to_admission < -100),]$onset_to_admission <- NA
+
+# need to generate start_to_exit, outcome
+data$start_to_exit <- as.numeric(difftime(as.Date(data$date_outcome, format = "%Y-%m-%d"), as.Date(data$date_start, format = "%Y-%m-%d"), units = "days"))
+# cut at 0 and 100 days
+data$start_to_end <- pmin(100, pmax(0, data$start_to_exit, na.rm = TRUE), na.rm = TRUE)
+
+#################################################
+
+# symptom-based case definitions
+
+# World Health Organization
+# 1.	A combination of acute fever and cough
+# Or , 
+# 2.	A combination of three or more of:
+#	fever
+#	cough
+#	general weakness and fatigue
+#	headache
+#	myalgia
+#	sore throat
+#	coryza
+#	dyspnoea
+#	anorexia
+#	nausea and vomiting
+#	diarrhoea
+#	altered mental status 
+data$symptoms_WHO <- NA
+data[which(data$symptoms_history_of_fever == TRUE & data$symptoms_cough == TRUE),]$symptoms_WHO <- TRUE
+data[which(apply(data[,c("symptoms_history_of_fever", "symptoms_cough", "symptoms_fatigue_malaise", "symptoms_headache", "symptoms_muscle_aches_joint_pain", "symptoms_sore_throat", "symptoms_runny_nose", "symptoms_shortness_of_breath", "symptoms_anorexia", "symptoms_vomiting_nausea", "symptoms_diarrhoea", "symptoms_altered_consciousness_confusion")], 1, sum, na.rm = TRUE) >= 3),]$symptoms_WHO <- TRUE
+
+# table(data$symptoms_WHO, useNA = "ifany")
+
+# Centers for Disease Control, United States
+# 1.	At least two of:
+#	fever
+#	chills
+#	rigors
+#	myalgia
+#	headache
+#	sore throat
+#	new olfactory and taste disorder
+# Or 
+# 2.	At least one of:
+#	cough
+#	shortness of breath
+#	difficulty breathing
+data$symptoms_CDC <- NA
+data[which(apply(data[,c("symptoms_history_of_fever", # "symptoms_rigor_or_sweating",
+                         "symptoms_muscle_aches_joint_pain", "symptoms_headache", "symptoms_sore_throat", "symptoms_lost_altered_sense_of_smell", "symptoms_lost_altered_sense_of_taste")], 1, sum, na.rm = TRUE) >= 2),]$symptoms_CDC <- TRUE
+# chills/rigor not available
+data[which(data$symptoms_cough == TRUE | data$symptoms_shortness_of_breath == TRUE),]$symptoms_CDC <- TRUE
+# difficulty breathing not available
+
+# table(data$symptoms_CDC, useNA = "ifany")
+
+# Public Health England
+# New cough, or temperature ≥37.8 °C, or a loss or change in sense of smell or taste 
+data$symptoms_PHE <- NA
+data[which(data$symptoms_cough == TRUE | data$symptoms_history_of_fever == TRUE | data$symptoms_lost_altered_sense_of_smell == TRUE | data$symptoms_lost_altered_sense_of_taste == TRUE),]$symptoms_PHE <- TRUE
+# table(data$symptoms_PHE, useNA = "ifany")
+
+# European Centre for Disease Prevention and Control
+# At least one of 
+#	cough
+#	fever
+#	shortness of breath
+#	sudden onset anosmia, ageusia or dysgeusia
+data$symptoms_ECDC <- NA
+data[which(data$symptoms_cough == TRUE | data$symptoms_history_of_fever == TRUE | data$symptoms_shortness_of_breath == TRUE | data$symptoms_lost_altered_sense_of_smell == TRUE | data$symptoms_lost_altered_sense_of_taste == TRUE),]$symptoms_ECDC <- TRUE
+
+# table(data$symptoms_ECDC, useNA = "ifany")
+
+# mean arterial pressure
+# map = (systolic + (2 * diastolic)) / 3
+# plot(data$vs_map, (data$vs_sysbp + (2 * data$vs_diabp)) / 3)
+```
+
+```{r, include = FALSE}
+# group countries with fewer than 50 individuals together
+data$country_grouped <- as.character(data$country)
+data[which(data$country %in% names(which(table(data$country) < 50))),]$country_grouped <- "Other"
+# change reference level of country_grouped to United States
+data$country_grouped <- relevel(as.factor(data$country_grouped), ref = which(levels(as.factor(data$country_grouped)) == "United States"))
+```
+
+```{r, include = FALSE}
+# Censoring time of discharged patients are changed to be after latest censoring time (to account for informative censoring)
+data$time_to_death <- data$start_to_end
+data$death <- as.numeric(data$outcome == "Death")
+table(data$death, useNA = "ifany")
+
+data[which(data$death == 0),]$time_to_death <- max(data$start_to_end) + 1
+
+summary(data$time_to_death)
+summary(data$start_to_end)
+
+# time from symptoms to admission
+data$onset_to_admission_positive_part <- pmax(data$onset_to_admission, 0)
+data$onset_to_death <- data$onset_to_admission_positive_part + data$time_to_death + 0.0001 # to avoid Warning message: In Surv(onset_to_admission_positive_part, onset_to_death, death) :  Stop time must be > start time, NA created
+```
+
+```{r, fig.height = 3, fig.width = 5, fig.cap = "Automatically produced flowchart **not to be included, to check numbers only**", include = TRUE}
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rectangle]        
+      tab1 [label = '@@1']
+      tab2 [label = '@@2']
+      tab3 [label = '@@3']
+      tab4 [label = '@@4']
+      tab5 [label = '@@5']
+      tab6 [label = '@@6']
+      tab7 [label = '@@7']
+      tab8 [label = '@@8']
+      tab9 [label = '@@9']
+
+      # edge definitions with the node IDs
+      tab1 -> tab2;
+      tab2 -> tab3;
+      tab2 -> tab4 -> tab5;
+      tab5 -> tab6;
+      tab5 -> tab7;
+      tab3 -> tab8;
+      tab3 -> tab9;
+      }
+
+      [1]: paste0('n = ', dim(data)[1], ' participants')
+      [2]: paste0('Participants with missing \\n age or sex (n = ', length(which(is.na(data$age) | is.na(data$sex))), ')')
+      [3]: paste0('Participants used in main analysis: n = ', length(which(!is.na(data$age) & !is.na(data$sex))))
+      [4]: paste0('Excluding participants from some sites in South Africa \\n from analysis of symptoms, treatments and lab values (n = ', length(which(!is.na(data$age) & !is.na(data$sex) & data$studyid == \"CVZXZMV\")), ')')
+      [5]: paste0('Participants used in analysis of \\n symptoms, treatments and lab values: n = ', length(which(!is.na(data$age) & !is.na(data$sex) & data$studyid != \"CVZXZMV\")))
+      [6]: paste0('SARS-CoV-2 positive: n = ', length(which(!is.na(data$age) & !is.na(data$sex) & data$studyid != \"CVZXZMV\" & data$sars_cov2 == \"Positive\")))
+      [7]: paste0('SARS-CoV-2 status not reported: n = ', length(which(!is.na(data$age) & !is.na(data$sex) & data$studyid != \"CVZXZMV\" & data$sars_cov2 == \"Unknown\")))
+      [8]: paste0('SARS-CoV-2 positive: n = ', length(which(!is.na(data$age) & !is.na(data$sex) & data$sars_cov2 == \"Positive\")))
+      [9]: paste0('SARS-CoV-2 status not reported: n = ', length(which(!is.na(data$age) & !is.na(data$sex) & data$sars_cov2 == \"Unknown\")))
+      ")
+```
+
+```{r}
+# exclude people with missing age or sex
+
+data <- data[which(!is.na(data$age) & !is.na(data$sex)),]
+# data <- data[which(data$age != "" & data$sex != ""),]
+```
+
+-----
+
+# Results
+
+## Participants' characteristics
+
+`r dim(data)[1]` patients were included (**Figure 1**), recruited from `r length(unique(data$siteid_final))` sites in `r length(unique(data$country))` countries (**Figure 2** and **Supplementary figure 1**).
+
+```{r, include = FALSE}
+# Get the world data
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# check that country names are spelled in the same way to avoid some countries dropping out when merging
+unique(data$country)[which(!(unique(data$country) %in% world$name))]
+
+world[grep("Russia", world$name),]$name <- "Russian Federation"
+world[grep("Korea", world$name)[1],]$name <- "South Korea"
+world[grep("St. Vin. and Gren.", world$name),]$name <- "St. Vincent and the Grenadines"
+world[grep("Czech", world$name),]$name <- "Czech Republic"
+world[grep("Verde", world$name),]$name <- "Cabo Verde"
+world[grep("Dominican", world$name),]$name <- "Dominican Republic"
+world[grep("Principe", world$name),]$name <- "Sao Tome and Principe"
+
+world <- merge(world, data.frame(table(data$country)), all.x = TRUE, all.y = TRUE, by.x = "name", by.y = "Var1")
+```
+
+```{r, fig.height = 5.5, fig.width = 10, fig.cap = "***Figure 2: Numbers of patients by country***"}
+ggplot(data = world) +
+  geom_sf(aes(fill = Freq)) +
+  scale_fill_viridis_c(option = "magma", na.value = "white", direction = -1, label = scales::comma, breaks = c(10, 100, 10000, 100000), trans = "log10") + # option = "plasma", trans = "sqrt"
+  labs(fill = "Number of patients") + 
+  theme_classic()
+```
+
+```{r, fig.height = 5.5, fig.width = 10, fig.cap = "***Supplementary figure 1: Numbers of patients by country***", include = supplement}
+numbers_by_country <- data %>%
+  group_by(country) %>%
+  summarise(count = n()) 
+  
+ggplot(data = numbers_by_country) +
+    geom_col(aes(x = country, y = count), fill = "turquoise4") +
+    geom_text(aes(x = country, y = 0.95 * (count), label = count), size = 3, angle = 90, hjust = 1, col = "white") +
+    theme_bw() +
+    scale_x_discrete(expand = c(0, 1.5)) +
+    ylab("Patient records (pseudo log scale)") +
+    theme(axis.text.x = element_text(angle = 45, hjust=1, size = 6), axis.title.x = element_blank()) +
+    scale_y_continuous(trans = pseudo_log_trans(), expand = c(0, 0.1), breaks = c(0, 1, 10, 100, 1000, 10000, 100000), minor_breaks = NULL)
+```
+
+```{r}
+# table_data: data with labels to be used in tables
+table_data <- data
+
+table_data[which(!is.na(table_data$vs_sysbp) & !is.na(table_data$vs_diabp)),]$vs_map <- (table_data[which(!is.na(table_data$vs_sysbp) & !is.na(table_data$vs_diabp)),]$vs_sysbp + (2 * table_data[which(!is.na(table_data$vs_sysbp) & !is.na(table_data$vs_diabp)),]$vs_diabp)) / 3
+
+dependent_variable <- "sex"
+
+table_data %>% 
+  mutate(sex = ff_label(sex, "Sex"),
+         age = ff_label(age, "Age"),
+         agegp10 = ff_label(agegp10, " "),
+         World.Bank.classification..by.region. = ff_label(World.Bank.classification..by.region., "Region"),
+         onset_to_admission = ff_label(onset_to_admission, "Onset to admission (days)"),
+         start_to_end = ff_label(start_to_end, "Length of hospital stay (days)"),
+         bmi_comb = ff_label(bmi_comb, "Body mass index (BMI) (kg/m\u00B2)"),
+         vs_height = ff_label(vs_height, "Height (cm)"),
+         # vs_weight = ff_label(vs_weight, "Weight (kg)"),
+         vs_hr = ff_label(vs_hr, "Heart rate on admission (bpm)"),
+         vs_map = ff_label(vs_map,	"Mean arterial pressure on admission (mmHg)"),
+         vs_sysbp = ff_label(vs_sysbp,	"Systolic blood pressure on admission (mmHg)"),
+         vs_diabp = ff_label(vs_diabp,	"Diastolic blood pressure on admission (mmHg)"),
+         vs_temp = ff_label(vs_temp,	"Temperature on admission (degrees C)"),
+         # vs_oxysat = ff_label(vs_oxysat,	"Oxygen saturation on admission (%)"),
+         vs_resp = ff_label(vs_resp, "Respiratory rate on admission"),
+         vs_oxysat = ff_label(vs_oxysat,	"Oxygen saturation on admission (%)"),
+         vs_oxysat_oxygen_therapy = ff_label(vs_oxysat_oxygen_therapy, "-       On oxygen therapy"),
+         vs_oxysat_room_air = ff_label(vs_oxysat_room_air, "-       In room air"),
+         vs_oxysat_unknown = ff_label(vs_oxysat_unknown, "-       Unknown oxygenation status"),
+#         vs_oxysat_unknown = ff_label(vs_oxysat_unknown, "-       Unknown ventilation status"),
+         treat_oxygen_therapy = fct_recode(as_factor(treat_oxygen_therapy), No = "FALSE", Yes = "TRUE"),
+         treat_oxygen_therapy = ff_label(treat_oxygen_therapy, "Ever received any oxygen supplementation"),
+         oxygen_treatments_count = ff_label(oxygen_treatments_count, "Number of types of oxygen supplementation"),
+         treat_invasive_ventilation = fct_recode(as_factor(treat_invasive_ventilation), No = "FALSE", Yes = "TRUE"),
+         treat_invasive_ventilation = ff_label(treat_invasive_ventilation, "Ever received invasive mechanical ventilation"),
+         treat_non_invasive_ventilation = fct_recode(as_factor(treat_non_invasive_ventilation), No = "FALSE", Yes = "TRUE"),
+         treat_non_invasive_ventilation = ff_label(treat_non_invasive_ventilation, "Ever received non-invasive ventilation"),
+         icu_ever = fct_recode(as_factor(icu_ever), No = "FALSE", Yes = "TRUE"),
+         icu_ever = ff_label(icu_ever, "Ever admitted to ICU"),
+         icu_day0 = fct_recode(as_factor(icu_day0), No = "FALSE", Yes = "TRUE"),
+         icu_day0 = ff_label(icu_day0, "Admitted directly to ICU"),
+         icu_day0_later = ff_label(icu_day0_later, "Admission to ICU"),
+         treat_high_flow_nasal_cannula = fct_recode(as_factor(treat_high_flow_nasal_cannula), No = "FALSE", Yes = "TRUE"),
+         treat_high_flow_nasal_cannula = ff_label(treat_high_flow_nasal_cannula, "High flow nasal cannula"),
+         treat_mask_oxygen_therapy = fct_recode(as_factor(treat_mask_oxygen_therapy), No = "FALSE", Yes = "TRUE"),
+         treat_mask_oxygen_therapy = ff_label(treat_mask_oxygen_therapy, "Oxygen therapy via mask"),
+         treat_nasal_oxygen_therapy = fct_recode(as_factor(treat_nasal_oxygen_therapy), No = "FALSE", Yes = "TRUE"),
+         treat_nasal_oxygen_therapy = ff_label(treat_nasal_oxygen_therapy, "Nasal oxygen therapy"),
+         outcome = ff_label(outcome, "Outcome"),
+         source = ff_label(source, "Data source"),
+         icu_day0 = ff_label(icu_day0, "Admitted directly to ICU"),
+         sars_cov2 = ff_label(sars_cov2, "SARS-CoV-2 status")) -> table_data
+```
+
+```{r, eval = FALSE}
+# check BMI variables
+ftable(table("vs" = !is.na(data$vs_bmi), "calc" = !is.na(data$vs_bmi_calc), "comb" = !is.na(data$bmi_comb), useNA = "ifany"))
+
+table(data$siteid_final, !is.na(data$bmi_comb), useNA = "ifany")
+table(data$country, !is.na(data$bmi_comb), useNA = "ifany")
+```
+
+```{r}
+explanatory_variables <- c("age", "agegp10", "World.Bank.classification..by.region.", 
+                           "onset_to_admission", "start_to_end",
+                           "bmi_comb", # "vs_bmi_calc", # "vs_height",
+                           "vs_hr", "vs_sysbp", "vs_diabp", "vs_temp", 
+                           "vs_oxysat", "vs_oxysat_oxygen_therapy", "vs_oxysat_room_air", "vs_oxysat_unknown", "vs_resp", 
+                           "icu_day0_later", "outcome", "sars_cov2")
+dependent_variable <- "sex"
+
+table_data %>%
+  summary_factorlist(dependent = dependent_variable, 
+                     explanatory = explanatory_variables, 
+                     p = FALSE, 
+                     add_dependent_label = TRUE, dependent_label_prefix = "", 
+                     cont = "median", 
+                     total_col = TRUE, 
+                     na_include = FALSE, 
+                     add_col_totals = TRUE, include_col_totals_percent = FALSE,
+                     add_row_totals = TRUE, include_row_totals_percent = FALSE,
+                     include_row_missing_col = FALSE,
+                     row_totals_colname = "N recorded (%)") -> t1
+
+names(t1)[1] <- ""
+
+# change censored
+t1[,3] <- gsub("Censored", "Unknown outcome", t1[,3])
+
+##
+
+# add percentages out of number with oxygen saturation available to saturation variables under specific circumstances
+t1[which(t1[,1] == "-       On oxygen therapy"), "N recorded (%)"] <- paste0(strsplit(t1[which(t1[,1] == "-       On oxygen therapy"), "N recorded (%)"], " ")[[1]][1], " (", round(100 * as.numeric(strsplit(t1[which(t1[,1] == "-       On oxygen therapy"), "N recorded (%)"], " ")[[1]][1]) / as.numeric(strsplit(t1[which(t1[,1] == "Oxygen saturation on admission (%)"), "N recorded (%)"], " ")[[1]][1]), 1), "%*)")
+t1[which(t1[,1] == "-       In room air"), "N recorded (%)"] <- paste0(strsplit(t1[which(t1[,1] == "-       In room air"), "N recorded (%)"], " ")[[1]][1], " (", round(100 * as.numeric(strsplit(t1[which(t1[,1] == "-       In room air"), "N recorded (%)"], " ")[[1]][1]) / as.numeric(strsplit(t1[which(t1[,1] == "Oxygen saturation on admission (%)"), "N recorded (%)"], " ")[[1]][1]), 1), "%*)")
+t1[which(t1[,1] == "-       Unknown oxygenation status"), "N recorded (%)"] <- paste0(strsplit(t1[which(t1[,1] == "-       Unknown oxygenation status"), "N recorded (%)"], " ")[[1]][1], " (", round(100 * as.numeric(strsplit(t1[which(t1[,1] == "-       Unknown oxygenation status"), "N recorded (%)"], " ")[[1]][1]) / as.numeric(strsplit(t1[which(t1[,1] == "Oxygen saturation on admission (%)"), "N recorded (%)"], " ")[[1]][1]), 1), "%*)")
+
+t1[3, 2] <- ""
+
+##
+
+knitr::kable(t1, align = c("l", "l", "l", "l", "r", "r", "r"), caption = "***Table 1: Participants' characteristics*** *Percent of individuals with oxygen saturation recorded") 
+```
+
+Overall `r round(as.numeric(prop.table(table(data$sars_cov2))["Positive"]) * 100, digits = 1)`% of the participants included in the main analysis were known to have a positive SARS-CoV-2 test (**Table 1**). Of the included participants `r round(prop.table(table(data$sex))["Male"] * 100, digits = 1)`% were male and the median age was `r round(median(data$age), digits = 1)` (range `r round(min(data$age), digits = 1)` to `r round(max(data$age), digits = 1)`, interquartile range [IQR] `r round(IQR(data$age), digits = 1)`). The median time from symptom onset to admission was `r round(median(data$onset_to_admission, na.rm = TRUE), digits = 1)` (IQR `r round(IQR(data$onset_to_admission, na.rm = TRUE), digits = 1)`) days. The median time from the latest of {symptom onset} and {admission} to the date of discharge, death or date last known to be alive was `r round(median(data$start_to_end, na.rm = TRUE), digits = 1)` (IQR `r round(IQR(data$start_to_end, na.rm = TRUE), digits = 1)`) days. Among `r length(which(!is.na(data$icu_ever)))` individuals with a known ICU admission status, `r round(as.numeric(prop.table(table(data$icu_ever))["TRUE"]) * 100, digits = 1)`% were admitted to ICU, about a third of whom were admitted directly (on the day of hospitalisation). Direct admission to ICU is reported for `r round(as.numeric(prop.table(table(data$icu_day0_later))["Direct admission"]) * 100, digits = 1)`% of patients (more males than females).
+Oxygen saturation on presentation was reported for `r round(as.numeric(prop.table(table(!is.na(data$vs_oxysat)))["TRUE"]) * 100, digits = 1)`% of patients with a median SpO2 of `r round(median(data$vs_oxysat, na.rm = TRUE), digits = 1)`% (IQR `r round(IQR(data$vs_oxysat, na.rm = TRUE), digits = 1)`%); `r round(as.numeric(prop.table(table(data[which(!is.na(data$vs_oxysat)),]$treat_oxygen_therapy))["TRUE"]) * 100, digits = 1)`% of these patients received oxygen supplementation during their hospitalisation. 
+
+The majority of patients were from sites in two countries (South Africa [`r format(100 * length(which(data$country == "South Africa")) / dim(data)[1], digits = 1, nsmall = 1)`%] and United Kingdom [`r format(100 * length(which(data$country == "United Kingdom")) / dim(data)[1], digits = 1, nsmall = 1)`%]) (**Table 1**).
+Participants' characteristics varied between patients admitted directly to ICU, those who were admitted at later time point, and those who were never admitted (**Supplementary table 1**). Anthropometric variables and vital signs varied by age (**Supplementary table 2**).
+
+```{r, include = supplement}
+table_data %>% 
+    mutate(icu_day0_later = fct_relevel(icu_day0_later, "Direct admission", "Later admission", "Never")) %>%
+    summary_factorlist(dependent = "icu_day0_later", explanatory = explanatory_variables[which(!(explanatory_variables %in% c("icu_ever", "icu_day0", "icu_day0_later")))], p = FALSE, add_dependent_label = TRUE, dependent_label_prefix = "", cont = "median", total_col = TRUE, na_include = TRUE, na_include_dependent = TRUE, add_col_totals = TRUE, add_row_totals = TRUE) %>% 
+    dplyr::select(-3) %>%
+    kable(align = c("l", "l", "r", "r", "r", "r"), caption = "***Supplementary table 1: Participants' characteristics by admission to ICU***")
+```
+
+```{r, include = supplement}
+explanatory_variables2 <- c("bmi_comb", "vs_height",
+                           "vs_hr", "vs_sysbp", "vs_diabp", "vs_temp", 
+                           "vs_oxysat", "vs_oxysat_oxygen_therapy", "vs_oxysat_room_air", "vs_oxysat_unknown", "vs_resp", 
+                           "icu_day0_later", "treat_invasive_ventilation", "treat_non_invasive_ventilation", "treat_high_flow_nasal_cannula", "treat_mask_oxygen_therapy", "treat_oxygen_therapy", # "oxygen_treatments_count", 
+                           "outcome", # "source", 
+                           "sars_cov2")
+
+table_data %>%
+  mutate(age20_s5 = cut(age, c(0, 10, 20, 50, 80, 120), right = FALSE, include.lowest = TRUE)) %>%
+#  mutate(age20 = fct_relevel(as.factor(age20), c("[0,20)", "[20,40)", "[40,60)", "[60,80)", "[80,120]"))) %>%
+  summary_factorlist(dependent = "age20_s5", explanatory = explanatory_variables2, p = FALSE, add_dependent_label = TRUE, dependent_label_prefix = "", cont = "median", total_col = TRUE, na_include = FALSE, add_col_totals = TRUE, add_row_totals = TRUE, include_row_missing_col = FALSE) -> t2
+
+names(t2)[1] <- "Age"
+knitr::kable(t2, align = c("l", "l", "r", "r", "r"), caption = "***Supplementary table 2: Participants' characteristics by age***")
+```
+
+## Presenting symptoms
+
+```{r}
+data_excl <- data[which(data$studyid != "CVZXZMV"),] # remove South Africa sites which do not collect symptom data
+
+data_excl %>%
+  mutate(sex = ff_label(sex, "Sex"),
+         age = ff_label(age, "Age"),
+         agegp10 = ff_label(agegp10, " "),
+         World.Bank.classification..by.region. = ff_label(World.Bank.classification..by.region., "Region"),
+         onset_to_admission = ff_label(onset_to_admission, "Onset to admission (days)"),
+         start_to_end = ff_label(start_to_end, "Length of hospital stay (days)"),
+         bmi_comb = ff_label(bmi_comb, "Body mass index (BMI) (kg/m\u00B2)"),
+         vs_height = ff_label(vs_height, "Height (cm)"),
+         # vs_weight = ff_label(vs_weight, "Weight (kg)"),
+         vs_hr = ff_label(vs_hr, "Heart rate on admission (bpm)"),
+         vs_map = ff_label(vs_map,	"Mean arterial pressure on admission (mmHg)"),
+         vs_sysbp = ff_label(vs_sysbp,	"Systolic blood pressure on admission (mmHg)"),
+         vs_diabp = ff_label(vs_diabp,	"Diastolic blood pressure on admission (mmHg)"),
+         vs_temp = ff_label(vs_temp,	"Temperature on admission (degrees C)"),
+         # vs_oxysat = ff_label(vs_oxysat,	"Oxygen saturation on admission (%)"),
+         vs_resp = ff_label(vs_resp, "Respiratory rate on admission"),
+         vs_oxysat = ff_label(vs_oxysat,	"Oxygen saturation on admission (%)"),
+         vs_oxysat_oxygen_therapy = ff_label(vs_oxysat_oxygen_therapy, "-       On oxygen therapy"),
+         vs_oxysat_room_air = ff_label(vs_oxysat_room_air, "-       In room air"),
+         vs_oxysat_unknown = ff_label(vs_oxysat_unknown, "-       Unknown oxygenation status"),
+#         vs_oxysat_unknown = ff_label(vs_oxysat_unknown, "-       Unknown ventilation status"),
+         treat_oxygen_therapy = fct_recode(as_factor(treat_oxygen_therapy), No = "FALSE", Yes = "TRUE"),
+         treat_oxygen_therapy = ff_label(treat_oxygen_therapy, "Ever received any oxygen supplementation"),
+         oxygen_treatments_count = ff_label(oxygen_treatments_count, "Number of types of oxygen supplementation"),
+         treat_invasive_ventilation = fct_recode(as_factor(treat_invasive_ventilation), No = "FALSE", Yes = "TRUE"),
+         treat_invasive_ventilation = ff_label(treat_invasive_ventilation, "Ever received invasive mechanical ventilation"),
+         treat_non_invasive_ventilation = fct_recode(as_factor(treat_non_invasive_ventilation), No = "FALSE", Yes = "TRUE"),
+         treat_non_invasive_ventilation = ff_label(treat_non_invasive_ventilation, "Ever received non-invasive ventilation"),
+         icu_ever = fct_recode(as_factor(icu_ever), No = "FALSE", Yes = "TRUE"),
+         icu_ever = ff_label(icu_ever, "Ever admitted to ICU"),
+         icu_day0 = fct_recode(as_factor(icu_day0), No = "FALSE", Yes = "TRUE"),
+         icu_day0 = ff_label(icu_day0, "Admitted directly to ICU"),
+         icu_day0_later = ff_label(icu_day0_later, "Admission to ICU"),
+         treat_high_flow_nasal_cannula = fct_recode(as_factor(treat_high_flow_nasal_cannula), No = "FALSE", Yes = "TRUE"),
+         treat_high_flow_nasal_cannula = ff_label(treat_high_flow_nasal_cannula, "High flow nasal cannula"),
+         treat_mask_oxygen_therapy = fct_recode(as_factor(treat_mask_oxygen_therapy), No = "FALSE", Yes = "TRUE"),
+         treat_mask_oxygen_therapy = ff_label(treat_mask_oxygen_therapy, "Oxygen therapy via mask"),
+         treat_nasal_oxygen_therapy = fct_recode(as_factor(treat_nasal_oxygen_therapy), No = "FALSE", Yes = "TRUE"),
+         treat_nasal_oxygen_therapy = ff_label(treat_nasal_oxygen_therapy, "Nasal oxygen therapy"),
+         outcome = ff_label(outcome, "Outcome"),
+         source = ff_label(source, "Data source"),
+         icu_day0 = ff_label(icu_day0, "Admitted directly to ICU"),
+         sars_cov2 = ff_label(sars_cov2, "SARS-CoV-2 status")) -> data_excl
+```
+
+The most common symptoms on presentation were fever (or history of fever, henceforth referred to as fever for brevity), cough and shortness of breath (**Figure 3** and **Supplementary table 3**). There was some variation by country (**Supplementary figure 2**). Fatigue/malaise, cough and shortness of breath were most prevalent amongst patients 40 to 70 years old. The prevalence of altered consciousness/confusion increased with age and was reported in `r format(prop.table(table(data_excl[which(data_excl$age >= 80),]$symptoms_altered_consciousness_confusion, useNA = "ifany"))["TRUE"] * 100, digits = 1, nsmall = 1)`% of patients of age over 80 years. Loss of smell or taste were not commonly reported, with a high proportion of missing values for these two symptoms (`r format(prop.table(table(data_excl$symptoms_lost_altered_sense_of_smell, useNA = "ifany"))[3] * 100, digits = 1, nsmall = 1)`% for loss of smell and `r format(prop.table(table(data_excl$symptoms_lost_altered_sense_of_taste, useNA = "ifany"))[3] * 100, digits = 1, nsmall = 1)`% for taste). Presenting symptoms have been previously described in more detail 4.
+
+```{r, include = supplement}
+names(data_excl) <- gsub("([[:punct:]])|\\s+", "_", names(data_excl))
+
+symptoms <- grep("symptoms_", names(data_excl), value = TRUE)[which(as.numeric(sapply(data_excl[,grep("symptoms_", names(data_excl), value = TRUE)], function(x) summary(x)["NA's"])) < 200000)] # [c(1:10, 18:51)]
+dependent_variable <- "sex"
+
+for (v in symptoms) {
+  data_excl[,v] <- ff_label(as.factor(data_excl[,v]), paste(toupper(substring(gsub("_", " ", gsub("symptoms_", "", v)), 1, 1)), substring(gsub("_", " ", gsub("symptoms_", "", v)), 2), sep = ""))
+  }
+
+# data_excl[,explanatory_variables] <- sapply(data_excl[,explanatory_variables], function(x) {x <- ff_label(x, gsub("(^|[[:space:]])([[:alpha:]])", "\\1\\U\\2", gsub("_", " ", gsub("symptoms_", "", names(x))), perl = TRUE)); return(x)})
+
+data_excl[,symptoms] %>% 
+  summary_factorlist(explanatory = symptoms, p = FALSE, na_include = TRUE, na_include_dependent = TRUE, na_complete_cases = FALSE, add_col_totals = FALSE, add_row_totals = TRUE, row_totals_colname = "N recorded (%)", include_row_missing_col = FALSE) -> t2
+
+# t2 <- t2[,-3]
+t2$label <- gsub("Altered consciousness confusion", "Altered consciousness/confusion", t2$label)
+t2$label <- gsub("Fatigue malaise", "Fatigue/malaise", t2$label)
+t2$label <- gsub("History of fever", "Fever", t2$label)
+t2$label <- gsub("Muscle aches joint pain", "Muscle ache/joint pain", t2$label)
+t2$label <- gsub("Vomiting nausea", "Vomiting/nausea", t2$label)
+t2$label <- gsub("Lost altered sense of smell", "Lost/altered sense of smell", t2$label)
+t2$label <- gsub("Lost altered sense of taste", "Lost/altered sense of taste", t2$label)
+
+t2$levels <- gsub("FALSE", "No", gsub("TRUE", "Yes", t2$levels))
+names(t2) <- c("Symptom", "N recorded (%)", "", "N (%)")
+knitr::kable(t2, align = c("l", "l", "l", "r"), caption = "***Supplementary table 3: Symptom prevalence***")
+```
+
+```{r symptoms_by_age, fig.height = 7, fig.width = 11, fig.cap = "***Figure 3: Symptom prevalence by age***"}
+# variable with country only if country has data on at least 500 patients
+data_excl$country_grouped2 <- data_excl$country
+data_excl$country_grouped2[which(data_excl$country_grouped2 %in% names(table(data_excl$country)[which(table(data_excl$country) < 500)]))] <- "Other"
+
+symptoms_long <- data_excl[,c("symptoms_abdominal_pain", "symptoms_altered_consciousness_confusion", "symptoms_cough", "symptoms_diarrhoea", "symptoms_fatigue_malaise", "symptoms_headache", "symptoms_history_of_fever", "symptoms_lost_altered_sense_of_smell", "symptoms_lost_altered_sense_of_taste", "symptoms_muscle_aches_joint_pain", "symptoms_shortness_of_breath", # "symptoms_sore_throat",
+"symptoms_vomiting_nausea", "age10", "sars_cov2", "country_grouped2")] %>% pivot_longer(cols = -c(age10, sars_cov2, country_grouped2), names_to = "symptom", values_to = "value")
+# symptoms_long <- data_excl[,c(explanatory_variables[1:23], "age10", "sars_cov2")] %>% pivot_longer(cols = -c(age10, sars_cov2), names_to = "symptom", values_to = "value")
+symptoms_long$value <- factor(symptoms_long$value, levels = c("TRUE", "FALSE"), labels = c("Yes", "No"))
+symptoms_long$age10 <- relevel(symptoms_long$age10, ref = 2)
+
+# change symptom labels
+symptoms_long$symptom <- paste(toupper(substring(gsub("_", " ", gsub("symptoms_", "", symptoms_long$symptom)), 1, 1)), substring(gsub("_", " ", gsub("symptoms_", "", symptoms_long$symptom)), 2), sep = "")
+
+# change some labels manually
+symptoms_long$symptom <- gsub("Altered consciousness confusion", "Altered consciousness/confusion", symptoms_long$symptom)
+symptoms_long$symptom <- gsub("Fatigue malaise", "Fatigue/malaise", symptoms_long$symptom)
+symptoms_long$symptom <- gsub("Muscle aches joint pain", "Muscle aches/joint pain", symptoms_long$symptom)
+symptoms_long$symptom <- gsub("Vomiting nausea", "Vomiting/nausea", symptoms_long$symptom)
+symptoms_long$symptom <- gsub("History of fever", "Fever", symptoms_long$symptom)
+symptoms_long$symptom <- gsub("Lost altered sense of smell", "Lost/altered sense of smell", symptoms_long$symptom)
+symptoms_long$symptom <- gsub("Lost altered sense of taste", "Lost/altered sense of taste", symptoms_long$symptom)
+
+symptoms_long$symptom <- fct_relevel(symptoms_long$symptom, c("Fever", "Fatigue/malaise", "Headache", "Muscle aches/joint pain",
+                                                              "Altered consciousness/confusion", "Abdominal pain", "Diarrhoea", "Vomiting/nausea", 
+                                                              "Cough", "Shortness of breath", # "Chest pain", "Wheezing",
+                                                              "Loss of smell", "Loss of taste"))
+
+ggplot(data = symptoms_long, aes(fill = value, x = age10)) + # facet_wrap(facets = vars(country_grouped)) +
+    facet_wrap(~ symptom) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+#    geom_bar(position = "fill") +
+#    scale_fill_viridis_d(name = "Symptom reported", labels = c("Yes", "No", "Missing")) +
+    scale_fill_grey(name = "Symptom reported", labels = c("Yes", "No", "Missing"), na.value = "white") +
+    xlab("Age") + ylab("Proportion") +
+#    labs(fill = "Symptom", xlab = "", ylab = "Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+```{r symptoms_by_country, fig.height = 35, fig.width = 20, fig.cap = "***Supplementary figure 2: Proportions of symptom prevalence by age for each country*** Countries with fewer than 500 are grouped into 'other'", include = supplement}
+ggplot(data = symptoms_long, aes(fill = value, x = age10)) + 
+    facet_grid(rows = vars(country_grouped2), cols = vars(symptom)) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Symptom reported", labels = c("Yes", "No", "Missing"), na.value = "white") +
+    xlab("Age") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+```{r symptoms_by_age_confirmed, fig.height = 7, fig.width = 11, fig.cap = "***Supplementary figure 3: Proportions of symptom prevalence by age among individuals with confirmed SARS-CoV-2***", include = supplement}
+ggplot(data = symptoms_long[which(symptoms_long$sars_cov2 == "Positive"),], aes(fill = value, x = age10)) + 
+    facet_wrap(~ symptom) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Symptom reported", labels = c("Yes", "No", "Missing"), na.value = "white") +
+#    scale_fill_viridis_d(name = "Symptom reported", labels = c("Yes", "No", "Missing")) +
+    xlab("Age") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+```{r symptoms_by_age_not_confirmed, fig.height = 7, fig.width = 11, fig.cap = "***Supplementary figure 4: Proportions of symptom prevalence by age among individuals without confirmed SARS-CoV-2***", include = supplement}
+ggplot(data = symptoms_long[which(symptoms_long$sars_cov2 != "Positive"),], aes(fill = value, x = age10)) + 
+    facet_wrap(~ symptom) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Symptom reported", labels = c("Yes", "No", "Missing"), na.value = "white") +
+#    scale_fill_viridis_d(name = "Symptom reported", labels = c("Yes", "No", "Missing")) +
+    xlab("Age") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+```{r, fig.width = 8.5, fig.height = 8, fig.cap = "***Supplementary figure 5: Proportions with each symptom by SARS-CoV-2 status***", include = supplement}
+ggplot(data = symptoms_long, aes(fill = value, x = sars_cov2)) + 
+    facet_wrap(~ symptom, labeller = labeller(symptom = label_wrap_gen(10))) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Symptom reported", labels = c("Yes", "No", "Missing"), na.value = "white") +
+#    scale_fill_viridis_d(name = "Symptom reported", labels = c("Yes", "No", "Missing")) +
+    xlab("SARS-CoV-2 detected") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+```{r}
+symptoms_long <- data_excl[,c("symptoms_WHO", "symptoms_CDC", "symptoms_PHE", "symptoms_ECDC", "age10", "sars_cov2")] %>% pivot_longer(cols = -c(age10, sars_cov2), names_to = "symptom", values_to = "value")
+symptoms_long$value <- factor(symptoms_long$value, levels = c("TRUE", "FALSE"), labels = c("Yes", "No"))
+symptoms_long$age10 <- relevel(symptoms_long$age10, ref = 2)
+
+# change symptom labels
+symptoms_long$symptom <- paste(toupper(substring(gsub("_", " ", gsub("symptoms_", "", symptoms_long$symptom)), 1, 1)), substring(gsub("_", " ", gsub("symptoms_", "", symptoms_long$symptom)), 2), sep = "")
+```
+
+```{r symptom_definitions_by_age, fig.height = 3.5, fig.width = 8, fig.cap = "***Figure 4: Proportions meeting each symptom definition by age***"}
+ggplot(data = symptoms_long, aes(fill = value, x = age10)) + 
+    facet_grid(~ symptom) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(na.value = "white") +
+    # scale_fill_viridis_d() + # name = "Definition met", labels = c("Yes", "No", "Missing")) +
+    xlab("Age") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"),
+          legend.position = "none")
+```
+
+```{r, fig.width = 5, fig.height = 4, fig.cap = "***Supplementary figure 6: Proportions meeting each symptom definition by SARS-CoV-2 status***", include = supplement}
+ggplot(data = symptoms_long, aes(fill = value, x = sars_cov2)) + 
+    facet_wrap(~ symptom, nrow = 1) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Definition met", labels = c("Yes", "No", "Missing"), na.value = "white") + 
+    # scale_fill_viridis_d(name = "Definition met", labels = c("Yes", "No", "Missing")) +
+    xlab("SARS-CoV-2") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"),
+          legend.position = "top")
+```
+
+```{r symptom_definitions_by_age_confirmed_not_confirmed, fig.height = 7, fig.width = 4.5, fig.cap = "***Supplementary figure 7: Proportions meeting each symptom definition by age and SARS-CoV-2 status***", include = supplement}
+ggplot(data = symptoms_long, aes(fill = value, x = age10)) + 
+    facet_grid(symptom ~ sars_cov2) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(na.value = "white") +
+    # scale_fill_viridis_d() + # name = "Definition met", labels = c("Yes", "No", "Missing")) +
+    xlab("Age") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"),
+          legend.position = "none")
+```
+
+Markers of inflammation, liver and kidney function are shown in **Supplementary table 4**. Lymphopenia was marked, but uraemia and transaminitis were not typical on presentation. Values of most markers varied by age (**Supplementary figure 8**).
+
+```{r, include = supplement}
+names(data_excl) <- gsub("urean", "urea", names(data_excl))
+
+lab_values <- grep("lab_", names(data_excl), value = TRUE)
+
+for (v in lab_values) {
+  data_excl[,v] <- ff_label(data_excl[,v], paste(toupper(substring(gsub("_", " ", gsub("lab_", "", v)), 1, 1)), substring(gsub("_", " ", gsub("lab_", "", v)), 2), sep = ""))
+  }
+
+data_excl %>% 
+  filter(!(lab_neut + lab_lym > lab_wbc)) %>%
+  mutate(lab_crp = ff_label(lab_crp, "C-Reactive Protein (mg/L)"),
+         lab_wbc = ff_label(lab_wbc, "White blood cell count (%*% 10^9 cells per L)"),
+         lab_neut = ff_label(lab_neut, "Neutrophil count (%*% 10^9 cells per L)"),
+         lab_lym = ff_label(lab_lym, "Lymphocyte count (%*% 10^9 cells per L)"),
+         lab_alt = ff_label(lab_alt, "Alanine aminotransferase (U/L)"),
+         lab_ast = ff_label(lab_ast, "Aspartate aminotransferase (U/L)"),
+         lab_bili = ff_label(lab_bili, "Total bilirubin ($\\mu$mol/L)"),
+         lab_urea = ff_label(lab_urea, "Urea (mmol/L)")
+         ) -> data_excl2
+
+data_excl2 %>% 
+  summary_factorlist(explanatory = lab_values, na_include = TRUE, na_include_dependent = TRUE, na_complete_cases = FALSE, add_col_totals = FALSE, add_row_totals = TRUE) -> t6
+
+data_excl2 %>% 
+  summary_factorlist(explanatory = lab_values, p = FALSE, cont = "median", na_include = TRUE, add_col_totals = FALSE, add_row_totals = TRUE) -> t6b
+
+t6 <- data.frame(t6[,c(1, 2, 5)], t6b[,5])
+t6[,1] <- gsub("%*% 10^9", "$\\times 10^9$", t6[,1], fixed = TRUE)
+names(t6) <- c("", "N", "Mean (SD)", "Median (IQR)")
+t6 <- rbind(t6, c("**Inflammation**", "", "", ""), c("**Liver function tests**", "", "", ""), c("**Kidney function tests**", "", "", ""))
+t6 <- t6[c(11, 5, 10, 7, 6, 12, 1, 3, 4, 13, 9),]
+row.names(t6) <- NULL
+kable(t6, align = c("l", "r", "r", "r"), caption = "***Supplementary table 4: Lab values*** *Patients with lymphocyte count plus neutrophil count greater than total white blood cell count were excluded*", escape = FALSE)
+```
+
+```{r, eval = FALSE}
+# check if lymphocytes + neutrophils < WBC
+plot(data_excl$lab_lym + data_excl$lab_neut, data_excl$lab_wbc)
+
+length(which(data_excl$lab_lym + data_excl$lab_neut > data_excl$lab_wbc)) # 962
+summary(data_excl[which(data_excl$lab_lym + data_excl$lab_neut > data_excl$lab_wbc), c("lab_lym", "lab_neut", "lab_wbc", "country")])
+table(data_excl[which(data_excl$lab_lym + data_excl$lab_neut > data_excl$lab_wbc), c("lab_lym", "lab_neut", "lab_wbc", "country")]$country)
+```
+
+```{r lab_values_by_age, fig.height = 7, fig.width = 12, fig.cap = "***Supplementary figure 8: Lab values by age*** *Patients with lymphocyte count plus neutrophic count greater than total white blood cell count were excluded*", include = supplement}
+lab_long <- data_excl2[,c(lab_values[-c(2, 8)], "age10")] %>%
+                pivot_longer(cols = -age10, names_to = "Biomarker", values_to = "value")
+lab_long$age10 <- relevel(lab_long$age10, ref = 2)
+
+for (v in lab_values[-c(2, 8)]) {
+  lab_long$Biomarker <- gsub(v, attr(data_excl2[,v], "label"), lab_long$Biomarker)
+  }
+
+# lab_long$Biomarker[grep("mu", lab_long$Biomarker)] <- expression(paste("Total~bilirubin~(", mu, "mol/L)"))
+lab_long$Biomarker <- gsub("$mu$", "mu*", lab_long$Biomarker, fixed = TRUE)
+lab_long$Biomarker <- gsub(" ", "~", lab_long$Biomarker, fixed = TRUE)
+lab_long$Biomarker <- gsub("(%*%~10^9", "(phantom()%*%~10^9", lab_long$Biomarker, fixed = TRUE)
+
+ggplot(data = lab_long, aes(y = value, x = age10)) + 
+    facet_wrap(~ Biomarker, labeller = labeller(Biomarker = label_parsed), scales = "free_y", nrow = 2, ncol = 4) + # label_parsed
+    # scale_y_continuous(trans = 'log10') +
+    geom_boxplot(fill = "lightgrey") +
+    xlab("Age") + ylab("Value") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+## Pre-existing comorbidities and risk factors
+
+```{r, include = FALSE}
+data$number_of_comorbidities <- apply(data[,grep("comorbid_", names(data), value = TRUE)], 1, sum, na.rm = TRUE)
+hist(data$number_of_comorbidities)
+
+# NA if not at least 5 non-missing comorbidities
+# data[which(!apply(!is.na(data[,grep("comorbid_", names(data), value = TRUE)]), 1, sum, na.rm = TRUE) >= 5),]$number_of_comorbidities <- NA
+data$number_of_nonmissing_comorbidities <- apply(!is.na(data[,grep("comorbid_", names(data), value = TRUE)]), 1, sum, na.rm = TRUE)
+hist(data$number_of_nonmissing_comorbidities)
+
+data[which(data$number_of_nonmissing_comorbidities < 5),]$number_of_comorbidities <- NA
+hist(data$number_of_comorbidities)
+
+summary(data$number_of_comorbidities)
+```
+
+```{r, include = supplement}
+comorbidities <- grep("comorbid_", names(data), value = TRUE)[which(as.numeric(sapply(data[,grep("comorbid_", names(data), value = TRUE)], function(x) summary(x)["NA's"])) < 400000)] # [c(1:5, 9:55)]
+
+for (v in comorbidities) {
+  data[,v] <- ff_label(as.factor(data[,v]), paste(toupper(substring(gsub("_", " ", gsub("comorbid_", "", v)), 1, 1)), substring(gsub("_", " ", gsub("comorbid_", "", v)), 2), sep = ""))
+  }
+
+data %>% 
+  summary_factorlist(explanatory = comorbidities,
+                     na_include = TRUE, na_include_dependent = TRUE, na_complete_cases = FALSE, add_col_totals = FALSE, add_row_totals = TRUE) -> t3
+
+t3 <- t3[,-3]
+t3$label <- gsub("Aids hiv", "HIV", t3$label)
+
+t3$levels <- gsub("FALSE", "No", gsub("TRUE", "Yes", t3$levels))
+names(t3) <- c("Symptom", "Total N", "", "N (%)")
+
+knitr::kable(t3, align = c("l", "l", "r", "r"), caption = "***Supplementary table 5: Proportions of individuals with pre-existing comorbidities and risk factors***")
+```
+
+Among `r length(which(!is.na(data$number_of_comorbidities)))` individuals with data available for any five or more comorbidities or risk factors, `r as.numeric(table(data$number_of_comorbidities == 0)["TRUE"])` (`r format(as.numeric(prop.table(table(data$number_of_comorbidities == 0))["TRUE"] * 100), digits = 1, nsmall = 1)`%) had no comorbidities reported.
+
+```{r, fig.width = 10, fig.cap = "***Figure 5: Prevalence of pre-existing comorbidities and risk factors***"}
+library(viridis)
+
+data[,comorbidities] %>% pivot_longer(everything()) %>%
+  mutate(name = paste(toupper(substring(gsub("_", " ", gsub("comorbid_", "", name)), 1, 1)), substring(gsub("_", " ", gsub("comorbid_", "", name)), 2), sep = ""),
+         name = gsub("Aids hiv", "AIDS/HIV", name)) %>% 
+  group_by(name) %>% mutate(prop = length(which(value == "TRUE")) / length(value)) %>%
+  ggplot(aes(x = fct_reorder(name, prop), fill = factor(value, levels = c("TRUE", "FALSE", "NA"), labels = c("Yes", "No", "NA"), exclude = NULL))) +
+  geom_bar(aes(y = (..count..)/sum(..count..)), position = position_fill(reverse = TRUE)) +
+  scale_fill_grey(name = "", na.value = "white") + 
+  scale_y_continuous(labels = scales::percent) +
+  xlab("") + ylab(" ") +
+  theme_minimal() +
+  theme(text = element_text(size = 15)) +
+  coord_flip()
+```
+
+There were `r (table(data$comorbid_aids_hiv)["TRUE"])` patients with HIV infection, `r as.numeric(table(data$comorbid_tuberculosis)["TRUE"])` with tuberculosis; `r as.numeric(table(data$comorbid_aids_hiv, data$comorbid_tuberculosis)["TRUE", "TRUE"])` had both. `r (table(data[which(data$country == "South Africa"),]$comorbid_aids_hiv)["TRUE"])` patients with HIV infection and `r as.numeric(table(data[which(data$country == "South Africa"),]$comorbid_tuberculosis)["TRUE"])` patients with tuberculosis were from sites in the Republic of South Africa.
+
+```{r comorbidities_by_age, fig.height = 10, fig.width = 12.5, fig.cap = "***Supplementary figure 9: Prevalence of pre-existing comorbidities and risk factors by age***", include = supplement}
+comorbidities_long <- data[,c(comorbidities[-16], "age10")] %>% pivot_longer(cols = -age10, names_to = "comorbidity", values_to = "value")
+comorbidities_long$value <- factor(comorbidities_long$value, levels = c("TRUE", "FALSE"), labels = c("Yes", "No"))
+comorbidities_long$age10 <- relevel(comorbidities_long$age10, ref = 2)
+
+# change symptom labels
+comorbidities_long$comorbidity <- paste(toupper(substring(gsub("_", " ", gsub("comorbid_", "", comorbidities_long$comorbidity)), 1, 1)), substring(gsub("_", " ", gsub("comorbid_", "", comorbidities_long$comorbidity)), 2), sep = "")
+
+# change some labels manually
+comorbidities_long$comorbidity <- gsub("Aids hiv", "HIV", comorbidities_long$comorbidity)
+
+ggplot(data = comorbidities_long, aes(fill = value, x = age10)) + 
+    facet_wrap(~ comorbidity) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Comorbidity present", labels = c("Yes", "No", "Missing"), na.value = "white") + 
+    xlab("Age") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+```{r, eval = FALSE}
+table("HIV/AIDS" = data$comorbid_aids_hiv, "Tuberculosis" = data$comorbid_tuberculosis, useNA = "ifany")
+
+hiv_tb <- cbind(table(data$country, "HIV/AIDS" = data$comorbid_aids_hiv)[,"TRUE", drop = FALSE],
+table(data$country, "Tuberculosis" = data$comorbid_tuberculosis)[,"TRUE", drop = FALSE])
+colnames(hiv_tb) <- c("HIV/AIDS", "Tuberculosis")
+hiv_tb
+```
+
+## Treatments
+
+```{r}
+explanatory_variables_ventilation <- c("treat_extracorporeal", "treat_invasive_ventilation", "treat_non_invasive_ventilation", "treat_high_flow_nasal_cannula", "oxygen_unspecified", "oxygen_treatments_count")
+
+data_excl %>%
+  filter(treat_oxygen_therapy == "Yes") %>%
+  mutate(oxygen_treatments_count = as.factor(na_if(as.character(oxygen_treatments_count), "0")),
+         oxygen_treatments_count = ff_label(oxygen_treatments_count, "Number of types of oxygen supplementation"),
+         oxygen_unspecified = ff_label(oxygen_unspecified, "Other or unspecified type of oxygen supplementation")) %>%
+  summary_factorlist(dependent = dependent_variable, explanatory = explanatory_variables_ventilation, p = FALSE, add_dependent_label = TRUE, dependent_label_prefix = "", cont = "median", total_col = TRUE, na_include = FALSE, add_col_totals = TRUE, add_row_totals = TRUE) -> table_ventilation
+
+names(table_ventilation)[1:2] <- c("", "N recorded (%)")
+table_ventilation <- table_ventilation[,-3]
+```
+
+Of `r length(which(!is.na(data_excl$treat_oxygen_therapy)))` patients with recorded information on oxygen therapy (`r round(100 * length(which(!is.na(data_excl$treat_oxygen_therapy))) / dim(data_excl)[1], 1)`% of total), `r as.numeric(table(data_excl$treat_oxygen_therapy)["Yes"])` (`r round(prop.table(table(data_excl$treat_oxygen_therapy))["Yes"] * 100, 1)`%) received oxygen therapy, which was delivered via nasal cannula to `r table(data_excl$treat_high_flow_nasal_cannula, useNA = "ifany")["Yes"]` (`r round(prop.table(table(data_excl$treat_high_flow_nasal_cannula, useNA = "ifany"))["Yes"] * 100, 1)`%), NIV to `r table(data_excl$treat_non_invasive_ventilation, useNA = "ifany")["Yes"]` (`r round(prop.table(table(data_excl$treat_non_invasive_ventilation, useNA = "ifany"))["Yes"] * 100, 1)`%) and IMV to `r table(data_excl$treat_invasive_ventilation, useNA = "ifany")["Yes"]` (`r round(prop.table(table(data_excl$treat_invasive_ventilation, useNA = "ifany"))["Yes"] * 100, 1)`%). A proportion of patients received multimodal oxygen delivery/ treatments (`r table(as.numeric(as.character(data_excl[which(data_excl$treat_oxygen_therapy == "Yes"),]$oxygen_treatments_count)) >= 2)["TRUE"]` [`r round(prop.table(table(as.numeric(as.character(data_excl[which(data_excl$treat_oxygen_therapy == "Yes"),]$oxygen_treatments_count)) >= 2))["TRUE"] * 100, 1)`%]). Of those who received IMV, `r round(prop.table(table(data_excl[which(data_excl$treat_invasive_ventilation == "Yes"),]$treat_non_invasive_ventilation, useNA = "ifany"))["Yes"] * 100, 1)`% also had had oxygen delivered via NIV and `r round(prop.table(table(data_excl[which(data_excl$treat_invasive_ventilation == "Yes"),]$treat_high_flow_nasal_cannula, useNA = "ifany"))["Yes"] * 100, 1)`% via cannula (**Table 2**).
+
+```{r}
+knitr::kable(table_ventilation, align = c("l", "l", "l", "l", "r", "r", "r"), caption = "***Table 2: Oxygen supplementation*** *Among patients who received at least one type of oxygen supplementation*") 
+```
+
+```{r}
+treatments <- grep("^treat_", names(data_excl), value = TRUE)[which(as.numeric(sapply(data_excl[,grep("^treat_", names(data_excl), value = TRUE)], function(x) summary(x)["NA's"])) < 208000)]
+treatments <- treatments[-which(treatments %in% c("treat_high_flow_nasal_cannula", "treat_invasive_ventilation", "treat_non_invasive_ventilation", "treat_mask_oxygen_therapy", "treat_nasal_oxygen_therapy", "treat_prone_ventilation", "treat_oxygen_therapy"))]
+
+for (v in treatments) {
+  data_excl[,v] <- ff_label(as.factor(data_excl[,v]), paste(toupper(substring(gsub("_", " ", gsub("treat_", "", v)), 1, 1)), substring(gsub("_", " ", gsub("treat_", "", v)), 2), sep = ""))
+  }
+```
+
+```{r, include = supplement}
+data_excl %>% 
+  mutate(treat_extracorporeal = ff_label(treat_extracorporeal, "Extracorporeal membrane oxygenation"),
+         treat_inotropes_vasopressors = ff_label(treat_inotropes_vasopressors, "Inotropes/vasopressors"),
+         treat_antibiotic_agents = ff_label(treat_antibiotic_agents, "Antibacterial agents"),
+         treat_therapeutic_anticoagulant = ff_label(treat_therapeutic_anticoagulant, "Anticoagulant"),
+         treat_off_label_compassionate_use_medications = ff_label(treat_off_label_compassionate_use_medications, "Off-label/compassionate use medications"),
+         treat_non_steroidal_anti_inflammatory = ff_label(treat_non_steroidal_anti_inflammatory, "Non-steroidal anti-inflammatory agents"),
+         treat_naso__nasogastric_oral_orogastric_fluids = ff_label(treat_naso__nasogastric_oral_orogastric_fluids, "Nasogastric fluids")) %>%
+  summary_factorlist(explanatory = treatments, p = FALSE, 
+                     na_include = TRUE,
+                     add_col_totals = FALSE, add_row_totals = TRUE) -> t4
+
+t4 <- t4[,-3]
+t4[,3] <- sub("FALSE", "No", t4[,3])
+t4[,3] <- sub("TRUE", "Yes", t4[,3])
+
+names(t4)[1] <- "Treatment"
+names(t4)[3] <- ""
+names(t4)[4] <- "N (%)"
+knitr::kable(t4, align = c("l", "l", "r", "r", "r", "r"), caption = "***Supplementary table 6: Number and proportion of patients receiving each treatment***")
+```
+
+```{r, fig.height = 4.5, fig.width = 10, fig.cap = "***Figure 6: Proportion who have received each treatment***"}
+treatments2 <- treatments[-which(treatments %in% c("treat_convalescent_plasma", "treat_antiinflammatory", "treat_extracorporeal", "treat_inhaled_nitric_oxide"))]
+
+data_excl[,treatments2] %>% pivot_longer(everything()) %>%
+  mutate(name = paste(toupper(substring(gsub("_", " ", gsub("treat_", "", name)), 1, 1)), substring(gsub("_", " ", gsub("treat_", "", name)), 2), sep = ""),
+         name = gsub("Antibiotic agents", "Antibacterial agents", name),
+         name = gsub("Naso  nasogastric oral orogastric fluids", "Nasogastric fluids", name),
+         name = gsub("Extracorporeal", "Extracorporeal membrane oxygenation", name),
+         name = gsub("Inotropes vasopressors", "Inotropes/vasopressors", name),
+         name = gsub("Off label compassionate use medications", "Off-label/compassionate use medications", name),
+         name = gsub("Non steroidal anti inflammatory", "Non-steroidal anti-inflammatory agents", name),
+         name = gsub("Therapeutic anticoagulant", "Anticoagulant", name)) %>% 
+  group_by(name) %>% mutate(prop = length(which(value == "TRUE")) / length(value)) %>%
+  ggplot(aes(x = fct_reorder(name, prop), fill = factor(value, levels = c("TRUE", "FALSE", "NA"), labels = c("Yes", "No", "NA"), exclude = NULL))) +
+  geom_bar(aes(y = (..count..)/sum(..count..)), position = position_fill(reverse = TRUE)) +
+  scale_fill_grey(name = "", na.value = "white") + 
+  scale_y_continuous(labels = scales::percent) +
+  xlab("") + ylab(" ") +
+  theme_minimal() +
+  theme(text = element_text(size = 15)) +
+  coord_flip()
+```
+  
+Information on antibacterial treatment was available for `r length(which(!is.na(data_excl$treat_antibiotic_agents)))` patients, `r as.numeric(table(data_excl$treat_antibiotic_agents)["TRUE"])` (`r round(prop.table(table(data_excl$treat_antibiotic_agents))["TRUE"] * 100, 1)`%) of whom reportedly received antibacterial agents. `r as.numeric(table(data_excl$treat_corticosteroids)["TRUE"])` of `r length(which(!is.na(data_excl$treat_corticosteroids)))` with data available (`r round(prop.table(table(data_excl$treat_corticosteroids))["TRUE"] * 100, 1)`%) received corticosteroids.
+
+```{r treatments_by_age, fig.height = 8, fig.width = 10, fig.cap = "***Supplementary figure 10: Proportion receiving each treatment by age***", include = supplement}
+treatments_long <- data_excl[,c(treatments, "age10")] %>% pivot_longer(cols = -age10, names_to = "treatment", values_to = "value")
+treatments_long$value <- factor(treatments_long$value, levels = c("TRUE", "FALSE"), labels = c("Yes", "No"))
+treatments_long$age10 <- relevel(treatments_long$age10, ref = 2)
+
+# change symptom labels
+treatments_long$treatment <- paste(toupper(substring(gsub("_", " ", gsub("treat_", "", treatments_long$treatment)), 1, 1)), substring(gsub("_", " ", gsub("treat_", "", treatments_long$treatment)), 2), sep = "")
+
+# change some labels manually
+treatments_long$treatment <- gsub("Antibiotic agents", "Antibacterial agents", treatments_long$treatment)
+treatments_long$treatment <- gsub("Extracorporeal", "Extracorporeal membrane oxygenation", treatments_long$treatment)
+treatments_long$treatment <- gsub("Inotropes vasopressors", "Inotropes/vasopressors", treatments_long$treatment)
+treatments_long$treatment <- gsub("Off label compassionate use medications", "Off-label/compassionate use medications", treatments_long$treatment)
+treatments_long$treatment <- gsub("Naso  nasogastric oral orogastric fluids", "Nasogastric fluids", treatments_long$treatment)
+treatments_long$treatment <- gsub("Non steroidal anti inflammatory", "Non-steroidal anti-inflammatory agents", treatments_long$treatment)
+treatments_long$treatment <- gsub("Therapeutic anticoagulant", "Anticoagulant", treatments_long$treatment)
+
+ggplot(data = treatments_long, aes(fill = value, x = age10)) + 
+    facet_wrap(~ treatment, ncol = 5, labeller = labeller(treatment = label_wrap_gen(20))) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Treatment received", labels = c("Yes", "No", "Missing"), na.value = "white") +
+#    scale_fill_discrete(name = "Treatment received", labels = c("Yes", "No", "Missing")) +
+    xlab("Age") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white"))
+```
+
+```{r corticosteroids_over_time, fig.height = 8, fig.width = 10, fig.cap = "***Supplementary figure 11: Use of corticosteroids over time in all patients and in patients who did and did not receive oxygen therapy*** *The green line shows the month that results on corticosteroids from the RECOVERY trial were published.*", include = supplement}
+data_excl$onset_month <- sapply(data_excl$date_start, function(x) paste(strsplit(as.character(x), "-")[[1]][1], strsplit(as.character(x), "-")[[1]][2], sep = "-"))
+
+data_excl %>%
+  filter(onset_month != "NA-NA") %>%
+  filter(!is.na(treat_invasive_ventilation)) %>%
+  mutate(treat_corticosteroids = fct_relevel(treat_corticosteroids, "TRUE", "FALSE"),
+         treat_oxygen_therapy = fct_relevel(treat_oxygen_therapy, "Yes", "No")) %>%
+#         treat_invasive_ventilation = fct_relevel(treat_invasive_ventilation, "Yes", "No")) %>%
+  ggplot(aes(x = onset_month, fill = treat_corticosteroids)) + 
+    facet_wrap(~ treat_oxygen_therapy, ncol = 1, labeller = as_labeller(c(Yes = "Received oxygen therapy", No = "No oxygen therapy reported"))) + 
+    # facet_wrap(~ treat_invasive_ventilation, ncol = 1, labeller = as_labeller(c(Yes = "Received IMV", No = "No IMV"))) + #, `NA` = "IMV status unknown"))) + # labeller = labeller(treatment = label_wrap_gen(20))) +
+    geom_bar(position = position_fill(reverse = TRUE)) +
+    scale_fill_grey(name = "Corticosteroids received", labels = c(`TRUE` = "Yes", `FALSE` = "No", `NA` = "Missing"), na.value = "white") +
+#    scale_fill_discrete(name = "Treatment received", labels = c("Yes", "No", "Missing")) +
+    xlab("Month of admission/symptom onset") + ylab("Proportion") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5),
+          panel.grid.major = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_rect(fill = "white")) +
+    geom_vline(xintercept = "2020-06", colour = "green3", lwd = 2.5)
+```
+
+## Case fatality ratio
+
+```{r}
+casefat2 <-  function(dataset, conf = 0.95){
+  
+  # Function for the estimation of the case fatality ratio based on the nonparametric KM-like method by
+  # Ghani et al. 2005:  https://doi.org/10.1093/aje/kwi230
+  
+  #############################################################
+  
+  # Exclude rows which no entries for length of stay or outcome
+  data2 <- dataset %>% dplyr::filter(!is.na(start_to_end) & !is.na(outcome))
+  
+  if (nrow(data2) > 0) {
+      data2$outcome <- factor(data2$outcome, levels = c("Censored", "Death", "Discharge"))
+      
+      data2$t <- abs(data2$start_to_end)
+      data2$f <- data2$outcome
+      
+      ###############################################################
+      # CFR calculation
+    
+      c = survfit(Surv(t, f) ~ 1, data = data2)
+      di = which(c$states=="Death")  # deaths
+      ri = which(c$states=="Discharge")  # recoveries
+
+      # c$pstate is cumulative incidence function for each endpoint
+      theta1 = max(c$pstate[,di])
+      theta2 = max(c$pstate[,ri])
+      
+      cfr = theta1/(theta1+theta2)
+      
+      ###############################################################
+      # Survivor function and variance for combined endpoint
+      
+      data2$f.end <- fct_recode(data2$f, endpoint = 'Death', endpoint = 'Discharge')
+      
+      c0 = survfit(Surv(t, f.end) ~ 1, data = data2)
+      si = which(c0$states!="endpoint")
+      S0 = c0$pstate[,si]
+      V0 = (c0$std.err[,si])^2
+      n = length(V0)
+      if(V0[n]<1E-12){
+        V0[n]=V0[n-1]
+      }
+      nrisk = c0$n.risk[,si]
+      
+      
+      # hazard contributions for each endpoint
+      h1 = c$n.event[,di]/nrisk
+      h2 = c$n.event[,ri]/nrisk
+      
+      ###############################################################
+      # Variances
+      
+      # Greenwood-like method
+      M = diag(V0)
+      for(j in 2:nrow(M)){
+        for(k in 1:(j-1)){
+          M[j, k] = V0[k]*S0[j]/S0[k]
+          M[k, j] = M[j, k]
+        }
+      }
+      
+      v1 = as.numeric(sum((S0)^2*h1/pmax(nrisk, 1)) + (h1 %*% M %*% h1))
+      v2 = as.numeric(sum((S0)^2*h2/pmax(nrisk, 1)) + (h2 %*% M %*% h2))
+      cov12 = as.numeric((h1 %*% M %*% h2))
+      
+      secfr = sqrt((theta2^2*v1 + theta1^2*v2 - 2*theta1*theta2*cov12))/(theta1+theta2)^2
+      
+      ###############################################################
+      # logit scale for CI
+      
+      lc = log(cfr/(1-cfr))
+      sel = sqrt(v1/theta1^2 + v2/theta2^2 - 2*cov12/(theta1*theta2))
+      alpha = (1-conf)/2
+      za = -qnorm(alpha)
+      llc = lc-za*sel
+      ulc = lc+za*sel
+      lcfr = exp(llc)/(1+exp(llc))
+      ucfr = exp(ulc)/(1+exp(ulc))
+      
+      ###############################################################
+      
+      # Two simple methods
+      Nt = c$n
+      Nd = sum(c$n.event[,di])
+      Nr = sum(c$n.event[,ri])
+      
+      e1 = Nd/Nt
+      see1 = sqrt(e1*(1-e1)/Nt)
+      a1 = Nd+0.5
+      b1 = Nt-Nd+0.5
+      le1 = qbeta(0.025, shape1=a1, shape2=b1)
+      ue1 = qbeta(0.975, shape1=a1, shape2=b1)
+      
+      
+      e2 = Nd/(Nd+Nr)
+      see2 = sqrt(e2*(1-e2)/(Nd+Nr))
+      a2 = Nd+0.5
+      b2 = Nr+0.5
+      alpha = (1-conf)/2
+      le2 = qbeta(alpha, shape1=a2, shape2=b2)
+      ue2 = qbeta(1-alpha, shape1=a2, shape2=b2)
+      
+      ###############################################################
+      
+      return(list(cfr=cfr, secfr=secfr, lcfr = lcfr, ucfr = ucfr, c=c,
+                  e1=e1, see1=see1, le1=le1, ue1=ue1,
+                  e2=e2, see2=see2, le2=le2, ue2=ue2))
+  } else {
+    return(NULL)
+  }
+}
+```
+
+```{r}
+cfr.results <- casefat2(data)
+cfr <- round(cfr.results$cfr, 3)
+lcfr <- round(cfr.results$lcfr, 3)
+ucfr <- round(cfr.results$ucfr, 3)
+```
+
+```{r, include = FALSE}
+cfr_country <- by(data, data$country, function(x) try(casefat2(x)))
+cfr_country <- cfr_country[which(unlist(lapply(cfr_country, length)) > 1)]
+
+plot(lapply(cfr_country, function(x) x$c$n), lapply(cfr_country, function(x) x$cfr), xlab = "Sample size", ylab = "CFR", xlim = c(0, 3000))
+```
+
+```{r, fig.width = 8, include = FALSE}
+cfr_dataframe <- data.frame("Country" = names(cfr_country),
+                            "n" = unlist(lapply(cfr_country, function(x) x$c$n)), 
+                            "CFR" = unlist(lapply(cfr_country, function(x) x$cfr)))
+
+cfr_dataframe <- cfr_dataframe %>% left_join(country.class, by = "Country")
+
+ggplot(cfr_dataframe, aes(x = n, y = CFR, label = Country)) +
+    geom_point(aes(size = n, colour = World.Bank.classification..by.region.)) + 
+    scale_size_continuous(range = c(1, 20)) + # scale_area() + coord_equal() + scale_colour_gradient(high = "red") + ylim(700, 1700) + xlim(700, 1700) +
+    labs(title = "CFR by country", size = "n", colour = "Region") +
+    ylab("CFR") +
+    xlab("n") +
+    theme_bw()
+```
+
+```{r, fig.width = 8, include = FALSE}
+library(ggrepel)
+
+# use either geom_label_repel() (draws rectangles around the text) or geom_text_repel()
+
+ggplot(cfr_dataframe[which(cfr_dataframe$Country != "UK"),], aes(x = n, y = CFR, label = Country)) +
+    geom_point(aes(colour = World.Bank.classification..by.region.)) + geom_text_repel() +
+#    geom_label_repel(box.padding   = 0.35, 
+#                     point.padding = 0.5,
+#                     segment.color = "grey50") +
+    scale_size_continuous(range = c(1, 20)) +
+    labs(title = "CFR by country", size = "n", colour = "Region") +
+    ylab("CFR") +
+    xlab("n") + # xlim(c(0, 3000)) +
+    theme_bw()
+```
+
+```{r}
+cfr_dataframe <- data.frame("Country" = names(cfr_country),
+                            "n" = unlist(lapply(cfr_country, function(x) x$c$n)), 
+                            "CFR" = unlist(lapply(cfr_country, function(x) x$cfr)),
+                            "se" = unlist(lapply(cfr_country, function(x) x$secfr)),
+                            "lower" = unlist(lapply(cfr_country, function(x) x$lcfr)),
+                            "upper" = unlist(lapply(cfr_country, function(x) x$ucfr)))
+
+cfr_dataframe <- cfr_dataframe %>% left_join(country.class, by = "Country") %>% filter(se > 0)
+
+weighted_average_cfr <- sum(cfr_dataframe$CFR / (cfr_dataframe$se)^2) / sum(1 / (cfr_dataframe$se)^2)
+se_weighted_average_cfr <- sqrt(1 / sum(1 / (cfr_dataframe$se)^2))
+```
+
+The case fatality ratio (CFR) varied by country (**Figure 7**). The weighted average CFR was `r round(weighted_average_cfr, 3)` (se `r format(se_weighted_average_cfr, digits = 3)`).
+
+```{r}
+# based on overall CFR
+funnel_limits <- data.frame(n = seq(1, max(cfr_dataframe$n), 1))
+funnel_limits$upper <- cfr + 1.96 * sqrt(1 / (funnel_limits$n * cfr * (1 - cfr)))
+funnel_limits$lower <- cfr - 1.96 * sqrt(1 / (funnel_limits$n * cfr * (1 - cfr)))
+funnel_limits <- gather(funnel_limits, key, value, -n)
+
+# based on weighted average CFR
+funnel_limits2 <- data.frame(n = seq(1, max(cfr_dataframe$n), 1))
+funnel_limits2$upper <- weighted_average_cfr + 1.96 * sqrt(1 / (funnel_limits2$n * weighted_average_cfr * (1 - weighted_average_cfr)))
+funnel_limits2$lower <- weighted_average_cfr - 1.96 * sqrt(1 / (funnel_limits2$n * weighted_average_cfr * (1 - weighted_average_cfr)))
+funnel_limits2 <- gather(funnel_limits2, key, value, -n)
+```
+
+```{r, fig.height = 4.5, fig.width = 8, fig.cap = "***Figure 7: CFR by country*** *Each point is a country and points are coloured by region. Line is inverse variance weighted average CFR.*"}
+ggplot(cfr_dataframe, aes(x = n, y = CFR)) +
+    geom_point(data = cfr_dataframe, aes(colour = World.Bank.classification..by.region.)) + 
+    geom_errorbar(aes(ymin = lower, ymax = upper, colour = World.Bank.classification..by.region.), width = 0) +
+    geom_line(data = funnel_limits2, aes(x = n, y = value, group = key), colour = "grey70", lty = 1) + 
+    coord_cartesian(ylim = c(0, 1)) +
+    geom_hline(yintercept = weighted_average_cfr, colour = "grey70") +
+    scale_size_continuous(range = c(1, 20)) + # scale_area() + coord_equal() + scale_colour_gradient(high = "red") + ylim(700, 1700) + xlim(700, 1700) +
+#    labs(title = "CFR by country", size = "n", colour = "Region") +
+    labs(size = "n", colour = "Region") +
+    ylab("CFR") +
+    xlab("n") + # xlim(c(0, 3000)) +
+    theme_bw()
+```
+
+```{r}
+# function to calculate and plot CFR by group
+cfr_by_group <- function(group) {
+  # overall CFR
+  cfr.results <- casefat2(group)
+  cfr <- round(cfr.results$cfr, 2)
+  lcfr <- round(cfr.results$lcfr, 2)
+  ucfr <- round(cfr.results$ucfr, 2)
+  
+  cfr_country <- by(group, group$country, function(x) try(casefat2(x)))
+  cfr_country <- cfr_country[which(unlist(lapply(cfr_country, length)) > 1)]
+  
+  # CFR by country
+  cfr_dataframe <- data.frame("Country" = names(cfr_country),
+                            "n" = unlist(lapply(cfr_country, function(x) x$c$n)), 
+                            "CFR" = unlist(lapply(cfr_country, function(x) x$cfr)),
+                            "se" = unlist(lapply(cfr_country, function(x) x$secfr)),
+                            "lower" = unlist(lapply(cfr_country, function(x) x$lcfr)),
+                            "upper" = unlist(lapply(cfr_country, function(x) x$ucfr)))
+
+  cfr_dataframe <- cfr_dataframe %>% left_join(country.class, by = "Country") %>% filter(se > 0)
+  
+  weighted_average_cfr <- sum(cfr_dataframe$CFR / (cfr_dataframe$se)^2) / sum(1 / (cfr_dataframe$se)^2)
+  se_weighted_average_cfr <- sqrt(1 / sum(1 / (cfr_dataframe$se)^2))
+
+  # based on overall CFR
+  funnel_limits <- data.frame(n = seq(1, max(cfr_dataframe$n), 1))
+  funnel_limits$upper <- cfr + 1.96 * sqrt(1 / (funnel_limits$n * cfr * (1 - cfr)))
+  funnel_limits$lower <- cfr - 1.96 * sqrt(1 / (funnel_limits$n * cfr * (1 - cfr)))
+  funnel_limits <- gather(funnel_limits, key, value, -n)
+  
+  # based on weighted average CFR
+  funnel_limits2 <- data.frame(n = seq(1, max(cfr_dataframe$n), 1))
+  funnel_limits2$upper <- weighted_average_cfr + 1.96 * sqrt(1 / (funnel_limits2$n * weighted_average_cfr * (1 - weighted_average_cfr)))
+  funnel_limits2$lower <- weighted_average_cfr - 1.96 * sqrt(1 / (funnel_limits2$n * weighted_average_cfr * (1 - weighted_average_cfr)))
+  funnel_limits2 <- gather(funnel_limits2, key, value, -n)
+
+  p <- ggplot(cfr_dataframe, aes(x = n, y = CFR)) +
+    geom_point(data = cfr_dataframe, aes(colour = World.Bank.classification..by.region.)) + 
+    geom_errorbar(aes(ymin = lower, ymax = upper, colour = World.Bank.classification..by.region.), width = 0) +
+    geom_line(data = funnel_limits, aes(x = n, y = value, group = key), colour = "grey70") + 
+    geom_line(data = funnel_limits2, aes(x = n, y = value, group = key), colour = "grey70", lty = 2) + 
+    coord_cartesian(ylim = c(0, 1)) +
+    geom_hline(yintercept = cfr, colour = "grey20") +
+    geom_hline(yintercept = weighted_average_cfr, colour = "grey50") +
+    scale_size_continuous(range = c(1, 20)) + # scale_area() + coord_equal() + scale_colour_gradient(high = "red") + ylim(700, 1700) + xlim(700, 1700) +
+    labs(title = "CFR by country", size = "n", colour = "Region") +
+    ylab("CFR") +
+    xlab("n") + # xlim(c(0, 3000)) +
+    theme_bw()
+
+  return(list("cfr" = cfr, "lcfr" = lcfr, "ucfr" = ucfr, "weighted_average_cfr" = weighted_average_cfr, "se_weighted_average_cfr" = se_weighted_average_cfr, "p" = p))
+  }
+```
+
+```{r, include = FALSE}
+cfr_by_icu <- by(data, data$icu_day0, function(x) cfr_by_group(x))
+```
+
+```{r, include = FALSE}
+cfr_by_icu2 <- by(data, data$icu_day0_later, function(x) cfr_by_group(x))
+cfr_by_icu2
+```
+
+Among patients for whom reporting commenced in the ICU, the CFR was `r round(cfr_by_icu[["TRUE"]]$weighted_average_cfr, 3)` (se `r format(cfr_by_icu[["TRUE"]]$se_weighted_average_cfr, digits = 3)`).
+Among patients who were admitted to the ICU but for whom reporting did not commence in the ICU the CFR was `r round(cfr_by_icu2[["Later admission"]]$weighted_average_cfr, 3)` (se `r format(cfr_by_icu2[["Later admission"]]$se_weighted_average_cfr, digits = 3)`).
+The CFR varied over time during the period of reporting, however different countries have contributed data during different time periods (**Supplementary figure 12**), and admission criteria likely varied by country and over time during the pandemic, contributing to the heterogeneity in severity of illness detected.
+
+```{r, include = FALSE}
+# change definition of onset_month because South Africa has a lot of patients with missing date_onset
+# data$onset_month <- sapply(data$date_onset, function(x) strsplit(as.character(x), "-")[[1]][2])
+# data$onset_month <- sapply(data$start.date, function(x) strsplit(as.character(x), "-")[[1]][2])
+
+data$onset_month <- sapply(data$date_start, function(x) paste(strsplit(as.character(x), "-")[[1]][1], strsplit(as.character(x), "-")[[1]][2], sep = "-"))
+
+cfr_country_month <- by(data, paste(data$country, data$onset_month, sep = "_"), function(x) try(casefat2(x)))
+cfr_country_month <- cfr_country_month[which(unlist(lapply(cfr_country_month, length)) > 1)]
+
+cfr_dataframe <- data.frame("Country" = sapply(names(cfr_country_month), function(x) strsplit(x, "_")[[1]][1]),
+                            "Month" = sapply(names(cfr_country_month), function(x) strsplit(x, "_")[[1]][2]),
+                            "n" = unlist(lapply(cfr_country_month, function(x) x$c$n)), 
+                            "CFR" = unlist(lapply(cfr_country_month, function(x) x$cfr)),
+                            "se" = unlist(lapply(cfr_country_month, function(x) x$secfr)),
+                            "lower" = unlist(lapply(cfr_country_month, function(x) x$lcfr)),
+                            "upper" = unlist(lapply(cfr_country_month, function(x) x$ucfr))
+                            )
+
+cfr_dataframe <- cfr_dataframe %>% left_join(country.class, by = "Country")
+```
+
+```{r, eval = FALSE}
+weighted_average_cfr <- by(cfr_dataframe, cfr_dataframe$Month, function(x) sum(x$CFR / (x$se)^2) / sum(1 / (x$se)^2))
+se_weighted_average_cfr <- by(cfr_dataframe, cfr_dataframe$Month, function(x) sqrt(1 / sum(1 / (x$se)^2)))
+```
+
+```{r, fig.height = 15, fig.width = 10, fig.cap = "***Supplementary figure 12: CFR by month of admission in each country***", include = supplement}
+# cfr_dataframe$Month <- gsub("^0", "", cfr_dataframe$Month)
+cfr_dataframe$Month <- factor(cfr_dataframe$Month) #, labels = seq(1:12))
+
+# remove Romania - only 8 patients (20may21)
+cfr_dataframe <- cfr_dataframe[which(cfr_dataframe$Country != "Romania"),]
+# cfr_dataframe <- cfr_dataframe[-grep("NA", cfr_dataframe$Month),]
+
+ggplot(cfr_dataframe, aes(x = Month, y = CFR, group = "Country")) +
+    facet_wrap(facets = vars(Country), ncol = 4) +
+    geom_point(aes(colour = Country)) + 
+    geom_line(aes(colour = Country)) +
+    scale_size_continuous(range = c(1, 20)) + # scale_area() + coord_equal() + scale_colour_gradient(high = "red") + ylim(700, 1700) + xlim(700, 1700) +
+#    labs(title = "CFR by country") + #, size = "n", colour = "Country") +
+    ylab("CFR") +
+    xlab("Month of admission") + # xlim(c(0, 3000)) +
+    theme_bw() +
+    theme(legend.position = "none", axis.text.x = element_text(angle = 45, size = 5, hjust = 1, vjust = 1))
+```
+
+```{r, fig.width = 9, fig.width = 14, include = FALSE}
+library(ggrepel)
+
+ggplot(cfr_dataframe[which(cfr_dataframe$Country != "UK"),], aes(x = Month, y = CFR, label = Country)) +
+    geom_point(aes(colour = World.Bank.classification..by.region.)) + geom_text_repel() +
+#    geom_label_repel(box.padding   = 0.35, 
+#                     point.padding = 0.5,
+#                     segment.color = "grey50") +
+    scale_size_continuous(range = c(1, 20)) +
+    labs(title = "CFR by country", size = "n", colour = "Region") +
+    ylab("CFR") +
+    xlab("Month of admission") + # xlim(c(0, 3000)) +
+    theme_bw()
+```
+
+```{r, fig.width = 9, fig.width = 14, include = FALSE}
+library(directlabels)
+
+ggplot(cfr_dataframe[which(cfr_dataframe$Country != "UK"),], aes(x = Month, y = CFR, group = Country)) +
+#    geom_point(aes(colour = World.Bank.classification..by.region.)) + 
+    geom_line(aes(colour = World.Bank.classification..by.region.)) +
+    scale_size_continuous(range = c(1, 20)) +
+    labs(title = "CFR by country", size = "n", colour = "Region") +
+    ylab("CFR") +
+    xlab("Month of admission") + # xlim(c(0, 3000)) +
+    theme_bw() +
+    geom_dl(aes(label = Country, color = World.Bank.classification..by.region.), method = list("first.points", cex = 0.9))
+#    geom_dl(aes(label = Country), method = list(dl.combine("first.points", "last.points")))
+```
+
+Death and discharge rates increased over the first 40 days since the latest of hospital admission and symptom onset (**Supplementary figure 13**).
+
+```{r, fig.height = 5, fig.width = 5, fig.cap = "***Supplementary figure 13: Cumulative incidence curves of death and discharge***", include = supplement}
+plot(survfit(Surv(start_to_end, as.factor(outcome)) ~ 1, data = data), col = c("darkgreen", "navy"), xlab = "Time (days)", ylab = "Cumulative incidence", ylim = c(0, 1), xlim = c(0, 99)) # xlim to avoid jump at end
+legend("topleft", legend = c("Death", "Discharge"), col = c("darkgreen", "navy"), lwd = 2, bty = "n")
+```
+
+## Associations with death
+
+Risk of death was higher for males than females (**Figure 8**).
+
+```{r, fig.cap = "***Figure 8: Cumulative incidence curves of death and discharge by sex***"}
+plot(survfit(Surv(start_to_end, as.factor(outcome)) ~ sex, data = data), col = rep(c("magenta", "navy"), times = 2), lty = rep(c(1, 2), each = 2), xlab = "Time (days)", ylab = "Cumulative incidence", ylim = c(0, 1), xlim = c(0, 99)) # xlim to avoid jump at end
+legend("topleft", legend = c("Female, Death", "Male, Death", "Female, Discharge", "Male, Discharge"), col = rep(c("magenta", "navy"), times = 2), lty = rep(c(1, 2), each = 2), lwd = 2, bty = "n")
+```
+
+```{r}
+# function to calculate quasi standard errors and plot
+
+# fitted object: a coxph or glm object
+# x_label: label for explanatory variable
+# y_label: label for estimates, defaults to "HR (95% CI)"
+# y_lim: limits for axis of estimates
+# y_breaks: breaks for axis of estimates
+# flip: whether the plot should be flipped to look like a forestplot, defaults to FALSE
+
+# also uses 'data' from environment
+
+plot_estimates <- function(fitted_object, variable, x_label = NULL, y_label = "HR (95% CI)", y_lim = NULL, y_breaks = NULL, flip = FALSE) {
+    fit_qv <- qvcalc(fitted_object, factorname = variable)
+    
+    df <- data.frame("label" = row.names(fit_qv$qvframe), "HR" = exp(fit_qv$qvframe$estimate), "lower95" = exp(fit_qv$qvframe$estimate - (1.96 * fit_qv$qvframe$quasiSE)), "upper95" = exp(fit_qv$qvframe$estimate + (1.96 * fit_qv$qvframe$quasiSE)))
+#    df$label <- factor(df$label, levels = names(table(data[,variable])))
+    df$label <- factor(df$label, levels = names(table(data[,variable]))[c(2, 1, 3:length(names(table(data[,variable]))))])
+    
+    if (flip == FALSE) {
+        ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95)) +
+            geom_pointrange() + 
+            geom_hline(yintercept = 1, lty = 2) +  # add a dotted line at y = 1
+            # coord_trans(y = "log") +
+            coord_cartesian(ylim = y_lim) +
+            scale_y_continuous(trans = "log", breaks = y_breaks) +
+            xlab(x_label) + ylab(y_label) +
+            theme_bw()
+        } else if (flip == TRUE) {
+        df$label <- factor(df$label, levels = rev(df$label))
+        ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95)) +
+            geom_pointrange() + 
+            geom_hline(yintercept = 1, lty = 2) +  
+            coord_cartesian(ylim = y_lim) +
+            scale_y_continuous(trans = "log", breaks = y_breaks) +
+            xlab(x_label) + ylab(y_label) + coord_flip() +
+            theme_bw()
+        }
+    }
+```
+
+```{r}
+# function to calculate quasi standard errors and plot by group
+
+# fitted object: a list of which each element is a coxph or glm object
+# x_label: label for explanatory variable
+# y_label: label for estimates, defaults to "HR (95% CI)"
+# y_lim: limits for axis of estimates
+# y_breaks: breaks for axis of estimates
+# flip: whether the plot should be flipped to look like a forestplot, defaults to FALSE
+# group_labels: labels for facets
+
+# also uses 'data' from environment
+
+plot_estimates_by_group <- function(fitted_object, variable, x_label = NULL, y_label = "HR (95% CI)", y_lim = NULL, y_breaks = NULL, flip = FALSE, group_labels) {
+
+  fit_qv <- lapply(fitted_object, function(x) qvcalc(x, factorname = variable))
+
+  l <- lapply(fit_qv, function(x) data.frame("label" = row.names(x$qvframe), "HR" = exp(x$qvframe$estimate), "lower95" = exp(x$qvframe$estimate - (1.96 * x$qvframe$quasiSE)), "upper95" = exp(x$qvframe$estimate + (1.96 * x$qvframe$quasiSE))))
+  l <- lapply(l, function(x) {x$label <- factor(x$label, levels = names(table(data[,variable]))); return(x)})
+  for (i in 1:length(l)) {l[[i]]$group <- names(l)[i]}
+  df <- data.frame(do.call(rbind, l))
+
+  # df$label <- factor(df$label, levels = rev(df$label))
+  df$label <- factor(df$label, levels = names(table(data[,variable]))[c(2, 1, 3:length(names(table(data[,variable]))))])
+
+
+  names(group_labels) <- names(l)
+
+  if (flip == FALSE) {
+    ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95)) +
+        facet_wrap(~ group, labeller = labeller(group = group_labels)) +
+        geom_pointrange() + 
+        geom_hline(yintercept = 1, lty = 2) +  
+        coord_cartesian(ylim = y_lim) +
+        scale_y_continuous(trans = "log", breaks = y_breaks) +
+        xlab(x_label) + ylab(y_label) +
+        theme_bw()
+    } else if (flip == TRUE) {
+    ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95)) +
+        facet_wrap(~ group, labeller = labeller(group = group_labels)) +
+        geom_pointrange() + 
+        geom_hline(yintercept = 1, lty = 2) +  
+        coord_cartesian(ylim = y_lim) +
+        scale_y_continuous(trans = "log", breaks = y_breaks) +
+        xlab(x_label) + ylab(y_label) + coord_flip() +
+        theme_bw()
+    }
+  }
+```
+
+```{r}
+# function to calculate quasi standard errors and plot by group on the same panel
+
+# fitted object: a list of which each element is a coxph or glm object
+# x_label: label for explanatory variable
+# y_label: label for estimates, defaults to "HR (95% CI)"
+# y_lim: limits for axis of estimates
+# y_breaks: breaks for axis of estimates
+# flip: whether the plot should be flipped to look like a forestplot, defaults to FALSE
+# group_labels: labels for facets
+
+# also uses 'data' from environment
+
+plot_estimates_by_group_same_panel <- function(fitted_object, variable, x_label = NULL, y_label = "HR (95% CI)", y_lim = NULL, y_breaks = NULL, flip = FALSE, group_labels) {
+
+  fit_qv <- lapply(fitted_object, function(x) qvcalc(x, factorname = variable))
+
+  l <- lapply(fit_qv, function(x) data.frame("label" = row.names(x$qvframe), "HR" = exp(x$qvframe$estimate), "lower95" = exp(x$qvframe$estimate - (1.96 * x$qvframe$quasiSE)), "upper95" = exp(x$qvframe$estimate + (1.96 * x$qvframe$quasiSE))))
+  l <- lapply(l, function(x) {x$label <- factor(x$label, levels = names(table(data[,variable]))); return(x)})
+  for (i in 1:length(l)) {l[[i]]$group <- names(l)[i]}
+  df <- data.frame(do.call(rbind, l))
+
+  # df$label <- factor(df$label, levels = rev(df$label))
+  df$label <- factor(df$label, levels = names(table(data[,variable]))[c(2, 1, 3:length(names(table(data[,variable]))))])
+
+  names(group_labels) <- names(l)
+
+  if (flip == FALSE) {
+    ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95, group = group, colour = group)) +
+        scale_colour_discrete(labels = group_labels, name = "") +
+        geom_pointrange(position = position_dodge(width = 0.2)) + 
+        geom_hline(yintercept = 1, lty = 2) +  
+        coord_cartesian(ylim = y_lim) +
+        scale_y_continuous(trans = "log", breaks = y_breaks) +
+        xlab(x_label) + ylab(y_label) +
+        theme_bw()
+    } else if (flip == TRUE) {
+    ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95, group = group, colour = group)) +
+        scale_colour_discrete(group_labels) +
+        geom_pointrange(position_dodge(width = 0.2)) + 
+        geom_hline(yintercept = 1, lty = 2) +  
+        coord_cartesian(ylim = y_lim) +
+        scale_y_continuous(trans = "log", breaks = y_breaks) +
+        xlab(x_label) + ylab(y_label) + coord_flip() +
+        theme_bw()
+    }
+  }
+```
+
+```{r}
+# function to calculate quasi standard errors and plot by group (interaction in model) on the same panel
+
+# fitted object: a single coxph or glm object
+# x_label: label for explanatory variable
+# y_label: label for estimates, defaults to "HR (95% CI)"
+# y_lim: limits for axis of estimates
+# y_breaks: breaks for axis of estimates
+# flip: whether the plot should be flipped to look like a forestplot, defaults to FALSE
+# group_labels: labels for facets
+
+# also uses 'data' from environment
+
+plot_estimates_by_group_interaction <- function(fitted_object, variable, x_label = NULL, y_label = "HR (95% CI)", y_lim = NULL, y_breaks = NULL, flip = FALSE, group_labels = NULL) {
+
+  fit_qv <- qvcalc(fitted_object, factorname = variable)
+
+  df <- data.frame("label" = row.names(fit_qv$qvframe), "HR" = exp(fit_qv$qvframe$estimate), "lower95" = exp(fit_qv$qvframe$estimate - (1.96 * fit_qv$qvframe$quasiSE)), "upper95" = exp(fit_qv$qvframe$estimate + (1.96 * fit_qv$qvframe$quasiSE)))
+  df$group <- sapply(df$label, function(x) strsplit(x, "[.]")[[1]][2])
+  df$label <- factor(sapply(df$label, function(x) strsplit(x, "[.]")[[1]][1]), levels = unique(sapply(names(table(data[,variable])), function(x) strsplit(x, "[.]")[[1]][1]))[c(2, 1, 3:length(names(table(data[,variable]))))])
+
+  if (is.null(group_labels)) {group_labels <- unique(df$group)}
+  
+  if (flip == FALSE) {
+    ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95, group = group, colour = group)) +
+        scale_colour_discrete(labels = group_labels, name = "") +
+        geom_pointrange(position = position_dodge(width = 0.2)) + 
+        geom_hline(yintercept = 1, lty = 2) +  
+        coord_cartesian(ylim = y_lim) +
+        scale_y_continuous(trans = "log", breaks = y_breaks) +
+        xlab(x_label) + ylab(y_label) +
+        theme_bw()
+    } else if (flip == TRUE) {
+    ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95, group = group, colour = group)) +
+        scale_colour_discrete(group_labels) +
+        geom_pointrange(position_dodge(width = 0.2)) + 
+        geom_hline(yintercept = 1, lty = 2) +  
+        coord_cartesian(ylim = y_lim) +
+        scale_y_continuous(trans = "log", breaks = y_breaks) +
+        xlab(x_label) + ylab(y_label) + coord_flip() +
+        theme_bw()
+    }
+  }
+```
+
+```{r}
+# fit <- coxph(Surv(time_to_death, death) ~ age10 + sex + strata(country_grouped), data = data)
+fit <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ age10 + sex + strata(country_grouped), data = data)
+# summary(fit)
+# kable(summary(fit)$coef, digits = 3)
+
+hr_age90 <- round(summary(fit)$coef["age10[90,100)", "exp(coef)"], 2)
+lcl_age90 <- format(round(summary(fit)$conf.int["age10[90,100)", "lower .95"], 2), nsmall = 2)
+ucl_age90 <- format(round(summary(fit)$conf.int["age10[90,100)", "upper .95"], 2), nsmall = 2)
+
+hr_male <- round(summary(fit)$coef["sexMale", "exp(coef)"], 2)
+lcl_male <- format(round(summary(fit)$conf.int["sexMale", "lower .95"], 2), nsmall = 2)
+ucl_male <- format(round(summary(fit)$conf.int["sexMale", "upper .95"], 2), nsmall = 2)
+```
+
+<!--
+<span style="color: red;">
+
+### Different timescales
+
+```{r, eval = FALSE}
+# different timescale
+fitA <- coxph(Surv(time_to_death, death) ~ age10 + sex + strata(country_grouped), data = data)
+summary(fitA)
+plot(cox.zph(fitA))
+
+fitB <- coxph(Surv(I(pmax(onset_to_admission, 0)), I(pmax(onset_to_admission, 0) + time_to_death), death) ~ age10 + sex + strata(country_grouped), data = data)
+summary(fitB)
+plot(cox.zph(fitB))
+```
+
+</span>
+-->
+
+```{r}
+# fit2 <- coxph(Surv(time_to_death, death) ~ I(age / 10) + sex + strata(country_grouped), data = data)
+fit2 <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ I(age / 10) + sex + strata(country_grouped), data = data)
+# summary(fit)
+# kable(summary(fit2)$coef, digits = 3)
+
+hr_age <- round(summary(fit2)$coef["I(age/10)", "exp(coef)"], 2)
+lcl_age <- format(round(summary(fit2)$conf.int["I(age/10)", "lower .95"], 2), nsmall = 2)
+ucl_age <- format(round(summary(fit2)$conf.int["I(age/10)", "upper .95"], 2), nsmall = 2)
+```
+
+Higher age was associated with a significantly higher risk of death, with a hazard ratio (HR) of `r hr_age` (95% CI `r lcl_age`, `r ucl_age`) per 10 years higher age, adjusting for sex and stratifying by country, with individuals aged 90-100 having a HR of `r hr_age90` (95% CI `r lcl_age90`, `r ucl_age90`) compared to the 20-30 age group (**Supplementary figure 14**).
+Males had a significantly higher risk of death compared to females, with a HR of `r hr_male` (95% CI `r lcl_male`, `r ucl_male`), adjusting for age (in 10-year groups) and stratifying by country.
+
+```{r, fig.height = 4, fig.cap = "***Supplementary figure 14: Hazard ratios and 95% CIs for death by age group*** *Adjusted for sex and stratified by country; HRs are plotted on logarithmic scale.*", include = supplement}
+plot_estimates(fitted_object = fit, variable = "age10", x_label = "Age", y_label = "HR (95% CI)", y_lim = c(0.5, 20), y_breaks = c(0.5, 1, 2.5, 5, 10, 20), flip = FALSE)
+```
+
+```{r, fig.height = 4, fig.width = 4, include = FALSE}
+# Scaled Schoenfeld residuals
+sr <- cox.zph(fit)
+sr
+
+# plot(sr, col = "cyan3", lwd = 1.5)
+
+plot(sr, var = "age10", col = "cyan3", lwd = 1.5)
+abline(h = 0, col = "green4")
+
+plot(sr, var = "sex", col = "cyan3", lwd = 1.5)
+abline(h = 0, col = "green4")
+```
+
+```{r, include = FALSE}
+# look at associations in first and second half of calendar time
+
+first_half <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ I(age / 10) + sex + strata(country_grouped), data = data[which(data$date_start < "2020-10-01"),])
+second_half <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ I(age / 10) + sex + strata(country_grouped), data = data[which(data$date_start >= "2020-10-01"),])
+
+kable(summary(first_half)$coef, digits = 2)
+kable(summary(second_half)$coef, digits = 2)
+
+#########
+
+coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ number_of_comorbidities + age10 + sex + strata(country_grouped), data = data)
+```
+
+```{r}
+fit <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ age10 + strata(sex) + strata(country_grouped), data = data)
+# fit <- coxph(Surv(time_to_death, death) ~ age10 + strata(sex) + strata(country_grouped), data = data)
+# summary(fit)
+# kable(summary(fit)$coef, digits = 3)
+```
+
+```{r, results = "asis", include = FALSE}
+fit_list <- list()
+for (ii in unique(data$sex)[1:2]) {
+  fit_list[[ii]] <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ age10 + strata(country_grouped), data = data[which(data$sex == ii),])
+#  fit_list[[ii]] <- coxph(Surv(time_to_death, death) ~ age10 + strata(country_grouped), data = data[which(data$sex == ii),])
+  }
+
+cat("**Male**")
+
+kable(summary(fit_list[[1]])$coef, digits = 2)
+
+cat("**Female**")
+
+kable(summary(fit_list[[2]])$coef, digits = 2)
+```
+
+```{r, fig.height = 4.5, fig.width = 7.5, fig.cap = "***Figure 9: Hazard ratios and 95% CIs for death by age group and sex*** *Stratified by country*"}
+data$int_age_sex <- interaction(data$age10, data$sex)
+fit <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ int_age_sex + strata(country_grouped), data = data)
+# fit <- coxph(Surv(time_to_death, death) ~ int_age_sex + strata(country_grouped), data = data)
+
+plot_estimates_by_group_interaction(fitted_object = fit, variable = "int_age_sex", x_label = "Age (years)", y_label = "HR (95% CI)", y_lim = c(0.5, 40), y_breaks = c(0.5, 1, 2.5, 5, 10, 20, 40), flip = FALSE, group_labels = c("Female", "Male"))
+```
+
+```{r, include = FALSE}
+fit_list <- list()
+for (ii in unique(data$country_grouped)[which(!is.na(unique(data$country_grouped)))]) {
+  try({
+  # fit_list[[ii]] <- coxph(Surv(time_to_death, death) ~ I(age / 10) + strata(sex), data = data[which(data$country_grouped == ii),])
+  fit_list[[ii]] <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ I(age / 10) + strata(sex), data = data[which(data$country_grouped == ii),])
+  })
+  }
+```
+
+```{r, fig.height = 5.5, fig.width = 7, fig.cap = "***Supplementary figure 15: Hazard ratios and 95% CIs for death per 10-year higher age by country*** *Model stratified by sex*", include = supplement}
+l <- lapply(fit_list, function(x) data.frame("HR" = summary(x)$conf.int[,"exp(coef)"], "lower95" = summary(x)$conf.int[,"lower .95"], "upper95" = summary(x)$conf.int[,"upper .95"], "logHR" = summary(x)$coef[,"coef"], "se" = summary(x)$coef[,"se(coef)"]))
+
+l <- l[which(!is.na(lapply(l, function(x) x[1, 1])))]
+
+# inverse variance weighted logHR
+l$Overall <- data.frame(matrix(NA, nrow = 1, ncol = 5))
+names(l$Overall) <- names(l[[1]])
+# data.frame("HR" = numeric(), "lower95" = numeric(), "upper95" = numeric(), "logHR" = numeric(), "se" = numeric())
+
+# beta = sum(beta_i / var_i) / sum(1 / var_i)
+l$Overall$logHR <- sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (x$logHR / (x$se^2))))) / sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (1 / (x$se^2)))))
+# se(beta) = sqrt(1 / sum(1 / var_i))
+l$Overall$se <- sqrt(1 / sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (1 / (x$se^2))))))
+l$Overall$HR <- exp(l$Overall$logHR)
+l$Overall$lower95 <- exp(l$Overall$logHR - (1.96 * l$Overall$se))
+l$Overall$upper95 <- exp(l$Overall$logHR + (1.96 * l$Overall$se))
+
+df <- data.frame(do.call(rbind, l))
+df$label <- row.names(df)
+df$label <- factor(df$label, levels = rev(df$label))
+
+ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95)) +
+            geom_pointrange() + 
+            geom_hline(yintercept = 1, lty = 2) +  
+            geom_hline(yintercept = l$Overall$HR, lty = 1, colour = "skyblue") +  
+            # coord_cartesian(ylim = c(0.75, 2)) +
+            scale_y_continuous(trans = "log", breaks = c(1, 1.5, 2, 4)) +
+            xlab("Country") + ylab("HR per 10 years higher age (95% CI)") + coord_flip(ylim = c(0.5, 8)) +
+            theme_bw()
+```
+
+```{r, include = FALSE}
+fit_list <- list()
+for (ii in unique(data$country_grouped)[which(!is.na(unique(data$country_grouped)))]) {
+  try({
+  fit_list[[ii]] <- coxph(Surv(onset_to_admission_positive_part, onset_to_death, death) ~ I(age / 10) + sex, data = data[which(data$country_grouped == ii),])
+  # fit_list[[ii]] <- coxph(Surv(time_to_death, death) ~ I(age / 10) + sex, data = data[which(data$country_grouped == ii),])
+  })
+  }
+```
+
+```{r, fig.height = 5.5, fig.width = 7, fig.cap = "***Supplementary figure 16: Hazard ratios and 95% CIs for death for males vs females by country*** *Model adjusted for age (numeric)*", include = supplement}
+l <- lapply(fit_list, function(x) data.frame("HR" = summary(x)$conf.int["sexMale", "exp(coef)"], "lower95" = summary(x)$conf.int["sexMale", "lower .95"], "upper95" = summary(x)$conf.int["sexMale", "upper .95"], "logHR" = summary(x)$coef["sexMale", "coef"], "se" = summary(x)$coef["sexMale", "se(coef)"]))
+
+l <- l[which(!is.na(lapply(l, function(x) x[1, 1])))]
+
+# inverse variance weighted logHR
+l$Overall <- data.frame(matrix(NA, nrow = 1, ncol = 5))
+names(l$Overall) <- names(l[[1]])
+# data.frame("HR" = numeric(), "lower95" = numeric(), "upper95" = numeric(), "logHR" = numeric(), "se" = numeric())
+
+# beta = sum(beta_i / var_i) / sum(1 / var_i)
+l$Overall$logHR <- sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (x$logHR / (x$se^2))))) / sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (1 / (x$se^2)))))
+# se(beta) = sqrt(1 / sum(1 / var_i))
+l$Overall$se <- sqrt(1 / sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (1 / (x$se^2))))))
+l$Overall$HR <- exp(l$Overall$logHR)
+l$Overall$lower95 <- exp(l$Overall$logHR - (1.96 * l$Overall$se))
+l$Overall$upper95 <- exp(l$Overall$logHR + (1.96 * l$Overall$se))
+
+df <- data.frame(do.call(rbind, l))
+df$label <- row.names(df)
+df$label <- factor(df$label, levels = rev(df$label))
+
+ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95)) +
+            geom_pointrange() + 
+            geom_hline(yintercept = 1, lty = 2) +  
+            geom_hline(yintercept = l$Overall$HR, lty = 1, colour = "skyblue") +  
+            # coord_cartesian(ylim = c(0.75, 2)) +
+            scale_y_continuous(trans = "log", breaks = c(1, 1.5, 2, 4)) +
+            xlab("Country") + ylab("HR for males vs females (95% CI)") + coord_flip(ylim = c(0.5, 8)) +
+            theme_bw()
+```
+
+## Association of comorbidities/risk factors and symptoms with risk of death
+
+```{r, fig.height = 5.5, fig.width = 19, eval = FALSE}
+explanatory <- c("comorbid_obesity", "comorbid_malignant_neoplasm", "comorbid_hypertension", "comorbid_diabetes", "comorbid_chronic_cardiac_disease", "comorbid_chronic_kidney_disease", "comorbid_chronic_pulmonary_disease", "comorbid_dementia", "strata(age10)", "strata(sex)", "strata(country_grouped)")
+# "I(age / 10)", "strata(sex)", "strata(country_grouped)")
+
+for (x in explanatory[1:8]) {
+  Hmisc::label(data[,x]) <- paste(toupper(substring(gsub("_", " ", gsub("comorbid_", "", x)), 1, 1)), substring(gsub("_", " ", gsub("comorbid_", "", x)), 2), sep = "")
+  }
+
+dependent <- "Surv(time_to_death, death)"
+data %>%
+     hr_plot(dependent, explanatory, dependent_label = " ", suffix = " ", remove_ref = TRUE, table_text_size = 8, plot_opts = list(xlab("HR, 95% CI"), theme(axis.title = element_text(size = 15)))) #, title_text_size = 20, 
+```
+
+```{r}
+fit_list <- list()
+for (ii in comorbidities) {
+# for (ii in grep("comorbid_", names(data), value = TRUE)) {
+  try({
+  # fit_list[[ii]] <- coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", ii, " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data)
+  fit_list[[ii]] <- coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", ii, " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data)
+  })
+  }
+
+# restrict sex and age range for pregnancy
+fit_list[["comorbid_pregnancy"]] <- coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2) + strata(country_grouped)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45),])
+
+# kable(data.frame(do.call(rbind, lapply(fit_list, function(x) summary(x)$coef[1, , drop = FALSE]))), digits = 2)
+```
+
+```{r, eval = FALSE}
+# consider missing as separate category
+data2 <- data
+data2[,comorbidities] <- sapply(data2[,comorbidities], function(x) {x[which(is.na(x))] <- "Missing"; return(x)})
+
+fit_list <- list()
+for (ii in comorbidities) {
+# for (ii in grep("comorbid_", names(data), value = TRUE)) {
+  try({
+  fit_list[[ii]] <- coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", ii, " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data2)
+  # onset_to_admission_positive_part, onset_to_death, death
+  })
+  }
+
+l <- lapply(fit_list, function(x) data.frame("HR" = summary(x)$conf.int[2, "exp(coef)"], "lower95" = summary(x)$conf.int[2, "lower .95"], "upper95" = summary(x)$conf.int[2, "upper .95"], "logHR" = summary(x)$coef[2, "coef"], "se" = summary(x)$coef[2, "se(coef)"]))
+ 
+df <- data.frame(do.call(rbind, l))
+df$label <- paste(toupper(substring(gsub("_", " ", gsub("comorbid_", "", row.names(df))), 1, 1)), substring(gsub("_", " ", gsub("comorbid_", "", row.names(df))), 2), sep = "")
+df$label <- gsub("Aids hiv", "AIDS/HIV", df$label)
+ggplot(data = df, aes(x = fct_reorder(label, HR), y = HR, ymin = lower95, ymax = upper95)) +
+           geom_pointrange() + 
+           geom_hline(yintercept = 1, lty = 2) +  
+           # coord_cartesian(ylim = c(0.75, 2)) +
+           scale_y_continuous(trans = "log", breaks = c(1, 1.25, 1.5, 2, 4)) +
+           xlab("") + ylab("HR (95% CI)") + coord_flip(ylim = c(0.75, 2.25)) +
+           theme_bw()
+
+#####
+
+summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_tuberculosis", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country == "South Africa"),]))
+# summary(coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_tuberculosis", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country == "South Africa"),]))
+
+summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_aids_hiv", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country == "South Africa"),]))
+# summary(coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_aids_hiv", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country == "South Africa"),]))
+```
+
+```{r, eval = TRUE}
+summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_aids_hiv * comorbid_tuberculosis", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data))
+```
+              
+```{r, include = FALSE}
+# sa <- summary(coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_aids_hiv + comorbid_tuberculosis", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country == "South Africa"),]))
+sa <- summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_aids_hiv + comorbid_tuberculosis", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country == "South Africa"),]))
+hiv_sa <- paste0(format(sa$conf.int["comorbid_aids_hivTRUE", "exp(coef)"], digits = 2, nsmall = 2), " (",
+                 format(sa$conf.int["comorbid_aids_hivTRUE", "lower .95"], digits = 2, nsmall = 2), ", ",
+                 format(sa$conf.int["comorbid_aids_hivTRUE", "upper .95"], digits = 2, nsmall = 2), ")")
+tb_sa <- paste0(format(sa$conf.int["comorbid_tuberculosisTRUE", "exp(coef)"], digits = 2, nsmall = 2), " (",
+                 format(sa$conf.int["comorbid_tuberculosisTRUE", "lower .95"], digits = 2, nsmall = 2), ", ",
+                 format(sa$conf.int["comorbid_tuberculosisTRUE", "upper .95"], digits = 2, nsmall = 2), ")")
+
+# other <- summary(coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_aids_hiv + comorbid_tuberculosis", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country != "South Africa"),]))
+other <- summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_aids_hiv + comorbid_tuberculosis", " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data[which(data$country != "South Africa"),]))
+hiv_other <- paste0(format(other$conf.int["comorbid_aids_hivTRUE", "exp(coef)"], digits = 2, nsmall = 2), " (",
+                 format(other$conf.int["comorbid_aids_hivTRUE", "lower .95"], digits = 2, nsmall = 2), ", ",
+                 format(other$conf.int["comorbid_aids_hivTRUE", "upper .95"], digits = 2, nsmall = 2), ")")
+tb_other <- paste0(format(other$conf.int["comorbid_tuberculosisTRUE", "exp(coef)"], digits = 2, nsmall = 2), " (",
+                 format(other$conf.int["comorbid_tuberculosisTRUE", "lower .95"], digits = 2, nsmall = 2), ", ",
+                 format(other$conf.int["comorbid_tuberculosisTRUE", "upper .95"], digits = 2, nsmall = 2), ")")
+```
+
+The associations with risk of death were similar (HR for HIV [95% CI] `r hiv_sa` among patients from the Republic of South Africa and `r hiv_other` among patients from other countries, for tuberculosis `r tb_sa` among patients from the Republic of South Africa and `r tb_other` among patients from other countries).
+
+```{r}
+l <- lapply(fit_list, function(x) data.frame("HR" = summary(x)$conf.int[1, "exp(coef)"], "lower95" = summary(x)$conf.int[1, "lower .95"], "upper95" = summary(x)$conf.int[1, "upper .95"], "logHR" = summary(x)$coef[1, "coef"], "se" = summary(x)$coef[1, "se(coef)"]))
+
+df <- data.frame(do.call(rbind, l))
+df$label <- paste(toupper(substring(gsub("_", " ", gsub("comorbid_", "", row.names(df))), 1, 1)), substring(gsub("_", " ", gsub("comorbid_", "", row.names(df))), 2), sep = "")
+df$label <- gsub("Aids hiv", "AIDS/HIV", df$label)
+
+df %>% kable(digits = 2)
+
+# ggplot(data = df, aes(x = fct_rev(label), y = HR, ymin = lower95, ymax = upper95)) +
+forest_comorbidities <- ggplot(data = df, aes(x = fct_reorder(label, HR), y = HR, ymin = lower95, ymax = upper95)) +
+            geom_pointrange() + 
+            geom_hline(yintercept = 1, lty = 2) +  
+            # coord_cartesian(ylim = c(0.75, 2)) +
+            scale_y_continuous(trans = "log", breaks = c(0.5, 0.75, 1, 1.25, 1.5, 2)) +
+            xlab("") + ylab("HR (95% CI)") + coord_flip(ylim = c(0.5, 2.1)) +
+            theme_bw()
+```
+
+<!--
+## Fine--Gray model
+
+```{r, eval = FALSE}
+data$outcome <- as.factor(data$outcome)
+fgdata <- finegray(Surv(start_to_end, outcome) ~ age + sex + strata(country_grouped), data = data)
+
+fgfit <- coxph(Surv(fgstart, fgstop, fgstatus) ~ age + sex + strata(country_grouped), weight = fgwt, data = fgdata)
+summary(fgfit)
+```
+-->
+
+```{r}
+data_excl[is.na(data_excl$symptoms_WHO),]$symptoms_WHO <- FALSE
+data_excl[is.na(data_excl$symptoms_CDC),]$symptoms_CDC <- FALSE
+data_excl[is.na(data_excl$symptoms_PHE),]$symptoms_PHE <- FALSE
+data_excl[is.na(data_excl$symptoms_ECDC),]$symptoms_ECDC <- FALSE
+
+symptoms <- grep("^symptoms_", names(data_excl), value = TRUE)[1:36][which(as.numeric(sapply(data_excl[,grep("^symptoms_", names(data_excl), value = TRUE)[1:36]], function(x) summary(x)["NA's"])) < 208000)] # [1:21]
+
+fit_list <- list()
+for (ii in symptoms) {
+  try({
+#  fit_list[[ii]] <- coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", ii, " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data_exclSA)
+  fit_list[[ii]] <- coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", ii, " + age + I(age^2) + strata(sex) + strata(country_grouped)")), data = data_excl)
+  })
+  }
+
+# kable(data.frame(do.call(rbind, lapply(fit_list, function(x) summary(x)$coef[1, , drop = FALSE]))), digits = 2)
+```
+
+```{r forestplot_comorbidities_symptoms, fig.height = 4, fig.width = 14, fig.cap = "***Figure 10: Associations of (A) comorbidities and (B) symptoms with risk of death*** *Adjusted for age and age$^2$, stratified by sex and country*"}
+l <- lapply(fit_list, function(x) data.frame("HR" = summary(x)$conf.int[1, "exp(coef)"], "lower95" = summary(x)$conf.int[1, "lower .95"], "upper95" = summary(x)$conf.int[1, "upper .95"], "logHR" = summary(x)$coef[1, "coef"], "se" = summary(x)$coef[1, "se(coef)"]))
+
+df <- data.frame(do.call(rbind, l))
+
+# change symptom labels
+df$label <- paste(toupper(substring(gsub("_", " ", gsub("symptoms_", "", row.names(df))), 1, 1)), substring(gsub("_", " ", gsub("symptoms_", "", row.names(df))), 2), sep = "")
+
+# change some labels manually
+df$label <- gsub("Altered consciousness confusion", "Altered consciousness/confusion", df$label)
+df$label <- gsub("Fatigue malaise", "Fatigue/malaise", df$label)
+df$label <- gsub("Muscle aches joint pain", "Muscle aches/joint pain", df$label)
+df$label <- gsub("Vomiting nausea", "Vomiting/nausea", df$label)
+df$label <- gsub("History of fever", "Fever", df$label)
+df$label <- gsub("Lost altered", "Lost/altered", df$label)
+
+# df$label <- gsub("Symptrcd upper respiratory tract symptoms", "Upper respiratory tract symptoms", df$label)
+# df$label <- gsub("Symptrcd loss of taste smell", "Loss of taste or smell", df$label)
+
+# symptoms_long$symptom <- fct_relevel(symptoms_long$symptom, c("Abdominal pain", "Altered consciousness/confusion", "Bleeding", "Chest pain", "Conjunctivitis", "Cough", "Diarrhoea", "Ear pain", "Fatigue/malaise", "Fever", "Headache", "Inability to walk", "Loss of smell", "Loss of taste", "Lymphadenopathy", "Muscle aches/joint pain", "Runny nose", "Seizures", "Severe dehydration", "Shortness of breath", "Skin rash", "Skin ulcers", "Sore throat", "Vomiting/nausea", "Wheezing")) #, "CDC", "EU", "PHE", "WHO"))
+
+df %>% kable(digits = 2)
+
+forest_symptoms <- ggplot(data = df, aes(x = fct_reorder(label, HR), y = HR, ymin = lower95, ymax = upper95)) +
+            geom_pointrange() + 
+            geom_hline(yintercept = 1, lty = 2) +  
+            # coord_cartesian(ylim = c(0.75, 2)) +
+            scale_y_continuous(trans = "log", breaks = c(0.5, 0.75, 1, 1.25, 1.5, 2)) +
+            xlab("") + ylab("HR (95% CI)") + coord_flip(ylim = c(0.5, 2.1)) +
+            theme_bw()
+
+# forest_comorbidities + forest_symptoms
+
+ggarrange(forest_comorbidities, forest_symptoms, labels = "AUTO")
+```
+
+```{r, include = FALSE}
+pregnancy <- summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2) + strata(country_grouped)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45),]))
+# note here different time scale than in analysis for figure
+# pregnancy <- summary(coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2) + strata(country_grouped)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45),]))
+hr_pregnancy <- paste0(format(pregnancy$conf.int["comorbid_pregnancyTRUE", "exp(coef)"], digits = 2, nsmall = 2), " (",
+                    format(pregnancy$conf.int["comorbid_pregnancyTRUE", "lower .95"], digits = 2, nsmall = 2), ", ",
+                    format(pregnancy$conf.int["comorbid_pregnancyTRUE", "upper .95"], digits = 2, nsmall = 2), ")")
+```
+
+```{r, eval = TRUE}
+# pregnancy by country
+for (ii in unique(data$country_grouped)) {
+  try({
+    cat(paste0("\n **", ii, "** \n"))
+    print(summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45 & data$country_grouped == ii),])))
+#    print(summary(coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45 & data$country_grouped == ii),])))
+    cat("\n")
+  })
+  }
+
+# pregnancy by region
+for (ii in unique(data$World.Bank.classification..by.region.)) {
+  try({
+    cat(paste0("\n **", ii, "** \n"))
+    print(summary(coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45 & data$World.Bank.classification..by.region. == ii),])))
+#    print(summary(coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45 & data$World.Bank.classification..by.region. == ii),])))
+    cat("\n")
+  })
+}
+
+# figure
+
+fit_list <- list()
+for (ii in unique(data$World.Bank.classification..by.region.)) {
+  try({
+  fit_list[[ii]] <- coxph(as.formula(paste0("Surv(onset_to_admission_positive_part, onset_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2)")), data = data[which(data$sex == "Female" & data$age >= 15 & data$age <= 45 & data$World.Bank.classification..by.region. == ii),])
+#  fit_list[[ii]] <- coxph(as.formula(paste0("Surv(time_to_death, death) ~ ", "comorbid_pregnancy", " + age + I(age^2)")), data = data[which(data$sex == "Female" & data$age  >= 15 & data$age <= 45 & data$World.Bank.classification..by.region. == ii),])
+ })
+  }
+
+# ```{r, fig.height = 5.5, fig.width = 7, fig.cap = "***Supplementary figure 15: Hazard ratios and 95% CIs for death per 10-year higher age by country*** *Model stratified by sex*", include = supplement}
+l <- lapply(fit_list, function(x) data.frame("HR" = summary(x)$conf.int[,"exp(coef)"], "lower95" = summary(x)$conf.int[,"lower .95"], "upper95" = summary(x)$conf.int[,"upper .95"], "logHR" = summary(x)$coef[,"coef"], "se" = summary(x)$coef[,"se(coef)"]))
+
+l <- l[which(!is.na(lapply(l, function(x) x[1, 1])))]
+
+# keep first row
+l <- lapply(l, function(x) x[1, , drop = FALSE])
+# remove one with Inf
+l <- l[1:6]
+
+# inverse variance weighted logHR
+l$Overall <- data.frame(matrix(NA, nrow = 1, ncol = 5))
+names(l$Overall) <- names(l[[1]])
+# data.frame("HR" = numeric(), "lower95" = numeric(), "upper95" = numeric(), "logHR" = numeric(), "se" = numeric())
+
+# beta = sum(beta_i / var_i) / sum(1 / var_i)
+l$Overall$logHR <- sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (x$logHR / (x$se^2))))) / sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (1 / (x$se^2)))))
+# se(beta) = sqrt(1 / sum(1 / var_i))
+l$Overall$se <- sqrt(1 / sum(unlist(lapply(l[1:(length(l) - 1)], function(x) (1 / (x$se^2))))))
+l$Overall$HR <- exp(l$Overall$logHR)
+l$Overall$lower95 <- exp(l$Overall$logHR - (1.96 * l$Overall$se))
+l$Overall$upper95 <- exp(l$Overall$logHR + (1.96 * l$Overall$se))
+
+df <- data.frame(do.call(rbind, l))
+df$label <- row.names(df)
+df$label <- factor(df$label, levels = rev(df$label))
+
+ggplot(data = df, aes(x = label, y = HR, ymin = lower95, ymax = upper95)) +
+            geom_pointrange() + 
+            geom_hline(yintercept = 1, lty = 2) +  
+            geom_hline(yintercept = l$Overall$HR, lty = 1, colour = "skyblue") +  
+            # coord_cartesian(ylim = c(0.75, 2)) +
+            scale_y_continuous(trans = "log", breaks = c(0.12, 0.25, 0.5, 1, 2, 4, 8)) +
+            xlab("Region") + ylab("HR of death for pregnancy (95% CI)") + coord_flip(ylim = c(0.12, 16)) +
+            theme_bw()
+```
+
+Shortness of breath, wheezing and altered consciousness/confusion were associated with a higher risk of death (**Figure 10**). In general, gastrointestinal, upper respiratory, musculoskeletal symptoms, and loss of taste or smell were associated with a lower risk of dying. Rheumatologic disorder was inversely associated with risk of death.
+Pregnancy was associated with a lower risk of death (HR `r hr_pregnancy` for females aged 15 to 45, adjusting for age, age$^2$ and stratifying by country).
+
+```{r, fig.height = 4, fig.width = 5, fig.cap = "***Supplementary figure 17: Multi-state model***", include = supplement}
+# library(DiagrammeR)
+
+nodes_df <- DiagrammeR::create_node_df(n = 7, label = c("Symptoms", "Hospital\nadmission", "Non-invasive\nventilation", "ICU", "Invasive mechanical\nventilation", "Death", "Discharge"), 
+                                       x = c(0,  0, 1, 2, 3, 4, 4) * 2.5,
+                                       y = c(0, -1, 1, 1, 1, 0, -1) * 2.5,
+                                       shape = c(rep("circle", 5), rep("rectangle", 2)),
+                                       width = rep(1.5, 7)) #, fillcolor = c(rep("lightblue", 5), rep("lightgrey", 2)))
+
+edges_df <- DiagrammeR::create_edge_df(from = c(1, 2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5), 
+                                       to   = c(2, 1, 3, 4, 6, 7, 4, 6, 7, 5, 6, 7, 6, 7), 
+                                       color = "darkgreen")
+
+graph <- DiagrammeR::create_graph(nodes_df, edges_df)
+
+render_graph(graph)
+```
+
+## Associations with admission to ICU and with use of IMV
+
+```{r, include = FALSE}
+table(data$icu_ever, useNA = "ifany")
+
+table(data$outcome, data$icu_ever, useNA = "ifany")
+
+data$icu_event <- NA
+data[which(data$icu_ever == TRUE),]$icu_event <- "ICU"
+data[which(data$icu_ever == FALSE & data$outcome == "Death"),]$icu_event <- "Death"
+data[which(data$icu_ever == FALSE & data$outcome == "Discharge"),]$icu_event <- "Discharge"
+data[which(data$icu_ever == FALSE & data$outcome == "Censored"),]$icu_event <- "Censored"
+
+table(data$icu_event, useNA = "ifany")
+
+data$time_to_icu <- as.numeric(difftime(pmin(data$date_outcome, data$icu_in, na.rm = TRUE), data$date_start, units = "days"))
+
+data[which(data$time_to_icu < 0 | data$time_to_icu > 100),]$time_to_icu <- NA
+
+table("time missing" = is.na(data$time_to_icu), "ICU ever" = data$icu_ever)
+
+# plot(data$start.to.ICU, data$time_to_icu)
+
+data$icu_event <- as.factor(data$icu_event)
+
+# time from symptom onset to ICU
+data$onset_to_icu <- data$onset_to_admission_positive_part + data$time_to_icu + 0.0001 # to avoid warning
+```
+
+```{r, include = FALSE}
+fit <- coxph(Surv(onset_to_admission_positive_part, onset_to_icu, icu_event == "ICU") ~ age10 + sex + strata(country_grouped), data = data)
+# fit <- coxph(Surv(time_to_icu, icu_event == "ICU") ~ age10 + sex + strata(country_grouped), data = data)
+summary(fit)
+
+males_icu <- paste0(format(round(summary(fit)$coef["sexMale", "exp(coef)"], 2), nsmall = 2), " (", format(round(summary(fit)$conf.int["sexMale", "lower .95"], 2), nsmall = 2), ", ", format(round(summary(fit)$conf.int["sexMale", "upper .95"], 2), nsmall = 2), ")")
+```
+
+The risk of admission to ICU increased with age after age 20-30 and started decreasing from age 60, with patients over 80 being very unlikely to be admitted to ICU. Males were more likely to be admitted to ICU overall, with a HR of `r males_icu`. 
+There was evidence of non-proportional hazards, indicating that the relative risk changed with time since symptom onset (or hospitalisation). Similar patterns were shown for use of IMV (**Figure 11**).
+
+```{r, fig.height = 4.5, fig.cap = "***Supplementary figure X: HRs (95% CIs) for ICU admission by age***", include = FALSE}
+age_icu <- plot_estimates(fitted_object = fit, variable = "age10", x_label = "Age (years)", y_label = "HR (95% CI)", y_lim = c(0.05, 2), y_breaks = c(0.05, 0.25, 0.5, 1, 1.5, 2), flip = FALSE)
+```
+
+```{r, fig.height = 4, fig.width = 4, include = FALSE}
+sr <- cox.zph(fit)
+sr
+plot(sr)
+```
+
+```{r, include = FALSE}
+table(data$treat_invasive_ventilation, useNA = "ifany")
+
+table(data$outcome, data$treat_invasive_ventilation, useNA = "ifany")
+
+data$imv_event <- NA
+data[which(data$treat_invasive_ventilation == TRUE),]$imv_event <- "IMV"
+data[which(data$treat_invasive_ventilation == FALSE & data$outcome == "Death"),]$imv_event <- "Death"
+data[which(data$treat_invasive_ventilation == FALSE & data$outcome == "Discharge"),]$imv_event <- "Discharge"
+data[which(data$treat_invasive_ventilation == FALSE & data$outcome == "Censored"),]$imv_event <- "Censored"
+
+table(data$imv_event, useNA = "ifany")
+
+data$time_to_imv <- as.numeric(difftime(pmin(data$date_outcome, data$date_imv_st, na.rm = TRUE), data$date_start, units = "days"))
+
+data[which(data$time_to_imv < 0 | data$time_to_imv > 100),]$time_to_imv <- NA
+
+table("time missing" = is.na(data$time_to_imv), "IMV ever" = data$treat_invasive_ventilation)
+
+# plot(data$start.to.IMV, data$time_to_imv)
+
+data$imv_event <- as.factor(data$imv_event)
+
+# time from symptom onset to IMV
+data$onset_to_imv <- data$onset_to_admission_positive_part + data$time_to_imv + 0.0001 # to avoid
+```
+
+```{r, include = FALSE}
+fit <- coxph(Surv(onset_to_admission_positive_part, onset_to_imv, imv_event == "IMV") ~ age10 + sex + strata(country_grouped), data = data)
+# fit <- coxph(Surv(time_to_imv, imv_event == "IMV") ~ age10 + sex + strata(country_grouped), data = data)
+summary(fit)
+```
+
+```{r, fig.height = 4.5, fig.width = 11, fig.cap = "***Figure 11: HRs (95% CIs) for (A) ICU admission and (B) use of IMV by age***"}
+age_imv <- plot_estimates(fitted_object = fit, variable = "age10", x_label = "Age (years)", y_label = "HR (95% CI)", y_lim = c(0.05, 2), y_breaks = c(0.05, 0.25, 0.5, 1, 1.5, 2), flip = FALSE)
+
+ggarrange(age_icu, age_imv, labels = "AUTO")
+```
+
+```{r, fig.height = 4, fig.width = 4, include = FALSE}
+sr <- cox.zph(fit)
+sr
+plot(sr)
+```
+
+# Supplementary material
+
+```{r}
+table(data$studyid, useNA = "ifany")
+
+length(table(data[which(data$studyid %in% c("CVCCPUK")),]$siteid_final))
+length(table(data[which(data$studyid %in% c("CVVCORE", "CVVECMO")),]$siteid_final))
+length(table(data[which(data$studyid %in% c("CVRAPID")),]$siteid_final))
+```
